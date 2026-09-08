@@ -1,0 +1,36 @@
+{
+  "name": "pms-manager",
+  "productName": "PMS Manager",
+  "version": "0.3.0",
+  "private": true,
+  "description": "PMS 요청내용과 프로젝트 소스를 연결하는 Windows 분석 도구",
+  "main": "src/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.cjs",
+    "pack": "electron-builder --win dir",
+    "dist": "electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "44.2.0",
+    "electron-builder": "26.15.3",
+    "jsdom": "^30.0.1"
+  },
+  "build": {
+    "appId": "local.pmsmanager.desktop",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": "portable",
+      "signAndEditExecutable": false
+    },
+    "portable": {
+      "artifactName": "PMS-Manager-${version}.exe"
+    }
+  }
+}

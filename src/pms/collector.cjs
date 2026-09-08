@@ -1,0 +1,114 @@
+const {pageAction} = require('./page.cjs');
+const {digest} = require('../core/source.cjs');
+const {contentFingerprint}=require('../core/content.cjs');
+const PMS_URL = 'https://ntest.daewooenc.com/expms/index.do';
+const PMS_ORIGIN = new URL(PMS_URL).origin;
+const sleep = (ms,signal) => new Promise((resolve,reject)=>{
+  signal?.throwIfAborted();
+  const abort=()=>{clearTimeout(timer);reject(signal.reason);};
+  const timer=setTimeout(()=>{signal?.removeEventListener('abort',abort);resolve();},ms);
+  signal?.addEventListener('abort',abort,{once:true});
+});
+
+class Collector {
+  constructor(contents, progress=()=>{}) {this.contents=contents;this.progress=progress;}
+  async call(action,arg) {
+    if (this.contents.isDestroyed() || new URL(this.contents.getURL()).origin !== PMS_ORIGIN) throw new Error('PMS 창을 열고 로그인과 조회를 완료하세요.');
+    const result = await this.contents.executeJavaScriptInIsolatedWorld(1001,[{code:`(${pageAction.toString()})(${JSON.stringify(action)},${JSON.stringify(arg??null)})`}]);
+    if (result.error) throw new Error(result.error);
+    return result;
+  }
+  async locate(id,signal) {
+    await this.call('scroll',0);
+    for(let page=0;page<500;page++) {
+      await sleep(160,signal);
+      const snap=await this.call('snapshot');
+      if(snap.rows.some(r=>r.id===id)) return;
+      if(snap.atEnd) break;
+      await this.call('scroll','next');
+    }
+    throw new Error('목록이 변경되어 요청을 찾지 못했습니다. 다시 수집하세요.');
+  }
+  async detail(id,signal) {
+    await this.call('select',id);
+    // Detail header and editor load separately. Require a stable body after a minimum settling period.
+    const start=Date.now();let last='',stable=0;
+    while(Date.now()-start<18000) {
+      await sleep(350,signal);
+      const snap=await this.call('snapshot');
+      if(snap.editorError) throw new Error(snap.editorError);
+      if(snap.detailId!==id || snap.selectedId!==id || !snap.editorReady || !snap.editorUpdated) {stable=0;continue;}
+      const key=digest(JSON.stringify([snap.text,snap.images]));
+      stable=key===last?stable+1:0;last=key;
+      if(stable>=3 && Date.now()-start>=1500) return snap;
+    }
+    throw new Error('요청ID와 상세 내용이 일치하는 상태를 확인하지 못했습니다.');
+  }
+  async collect(signal) {
+    const original=await this.call('snapshot');
+    const discovered=new Map(),results=[];
+    if(!original.expected && !original.rows.length) return [];
+    if(original.expected>500) throw new Error('한 번에 최대 500건을 수집합니다. PMS 검색조건을 좁혀 다시 조회하세요.');
+    try {
+      await this.call('scroll',0);
+      for(let page=0;page<500;page++) {
+        await sleep(180,signal);
+        const snap=await this.call('snapshot');
+        if(original.expected!==snap.expected) throw new Error('수집 중 목록 건수가 바뀌었습니다. 다시 조회하고 실행하세요.');
+        for(const row of snap.rows) discovered.set(row.id,row);
+        if(snap.atEnd) break;
+        await this.call('scroll','next');
+      }
+      if(discovered.size!==original.expected) throw new Error(`목록 ${original.expected}건 중 ${discovered.size}건만 읽었습니다. 그리드 스크롤·페이지 상태를 확인하세요. 부분 목록을 전체로 처리하지 않습니다.`);
+      for(const row of [...discovered.values()].sort((a,b)=>a.rowIndex-b.rowIndex)) {
+        signal?.throwIfAborted();
+        this.progress({phase:'수집',message:row.id,current:results.length+1,total:discovered.size});
+        try {
+          await this.locate(row.id,signal);
+          const detail=await this.detail(row.id,signal);
+          const images=[],warnings=[];
+          if(detail.images.length>12) warnings.push(`이미지 ${detail.images.length}개 중 최대 12개만 수집합니다.`);
+          for(const image of detail.images.slice(0,12)) {
+            signal?.throwIfAborted();
+            try {
+              images.push(await this.loadImage(image,signal));
+            } catch(e) {if(signal?.aborted) throw e;warnings.push(`이미지 읽기 실패: ${e.message}`);}
+          }
+          if(!detail.text.trim() && !images.length) throw new Error('요청내용과 이미지가 비어 있습니다.');
+          if(detail.text.length>100000) throw new Error('요청내용이 100,000자를 넘습니다. 요청을 나누어 주세요.');
+          const snapshot={...row,text:detail.text,images,warnings,contentComplete:images.length===detail.images.length,collectedAt:new Date().toISOString()};
+          snapshot.fingerprint=contentFingerprint(snapshot);
+          results.push(snapshot);
+        } catch(e) {if(signal?.aborted) throw e;results.push({...row,error:e.message,collectedAt:new Date().toISOString()});}
+      }
+      return results;
+    } finally {
+      try {
+        if(original.selectedId) {await this.locate(original.selectedId);await this.call('select',original.selectedId);}
+        await this.call('scroll',original.scrollTop);
+      } catch {this.progress({phase:'수집',message:'원래 선택 행 복원에 실패했습니다. PMS 화면을 확인하세요.'});}
+    }
+  }
+  async loadImage(image,signal) {
+    let bytes,mime;
+    if(image.src.startsWith('data:')) {
+      const m=/^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=\s]+)$/.exec(image.src);
+      if(!m) throw new Error('지원하지 않는 이미지 데이터');
+      mime=m[1];bytes=Buffer.from(m[2],'base64');
+    } else {
+      const url=new URL(image.src);
+      if(url.origin!==PMS_ORIGIN) throw new Error('PMS 외부의 이미지 주소입니다.');
+      const response=await this.contents.session.fetch(url.href,{signal,redirect:'error'});
+      if(!response.ok) throw new Error(`HTTP ${response.status}`);
+      mime=response.headers.get('content-type')?.split(';')[0];
+      if(!/^image\/(png|jpeg|webp|gif)$/.test(mime||'')) throw new Error('이미지 형식이 아닙니다.');
+      const reader=response.body.getReader(),chunks=[];let size=0;
+      try {for(;;){const {done,value}=await reader.read();if(done)break;size+=value.length;if(size>8*1024*1024)throw new Error('이미지가 8MB를 넘습니다.');chunks.push(Buffer.from(value));}}
+      finally {await reader.cancel();}
+      bytes=Buffer.concat(chunks);
+    }
+    if(bytes.length>8*1024*1024) throw new Error('이미지가 8MB를 넘습니다.');
+    return {mime,data:bytes.toString('base64'),alt:image.alt,hash:digest(bytes),bytes:bytes.length};
+  }
+}
+module.exports={Collector,PMS_URL,PMS_ORIGIN};

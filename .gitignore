@@ -1,0 +1,8 @@
+node_modules/
+release/
+.pnpm-store/
+.test-data/
+*.log
+.env*
+.local-data/
+.electron-cache/
