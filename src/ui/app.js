@@ -6,7 +6,7 @@ function el(tag,text,cls){const node=document.createElement(tag);if(text!==undef
 function button(text,fn,cls='button'){const b=el('button',text,cls);b.type='button';b.addEventListener('click',()=>run(fn));return b;}
 function notice(text){$('toast').textContent=text;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,8500);}
 async function run(fn){try{await fn();}catch(e){notice(e.message||String(e));}}
-function setBusy(value){busy=value;document.querySelectorAll('button').forEach(b=>{if(!['cancel','close-image'].includes(b.id))b.disabled=value;});$('cancel').hidden=!value;}
+function setBusy(value){busy=value;document.querySelectorAll('button').forEach(b=>{if(!b.closest('.chat-panel')&&!b.closest('#activity-queue')&&!['cancel','close-image'].includes(b.id))b.disabled=value;});$('cancel').hidden=!value;updateChatControls();}
 async function work(fn){setBusy(true);try{return await fn();}finally{setBusy(false);await refresh();}}
 function stateOf(r){if(r.error||r.analysisError||r.analysisStale||r.contentComplete===false)return ['다시 확인','warn','attention'];if(r.analysis)return ['분석 완료','good','done'];return ['분석 전','','pending'];}
 function filtered(){const q=$('search').value.toLowerCase().trim();return requests.filter(r=>(r.id+' '+r.title).toLowerCase().includes(q)&&($('filter').value==='all'||stateOf(r)[2]===$('filter').value));}
@@ -16,6 +16,7 @@ function drawRows(){
   if(!rows.length)root.append(el('div',requests.length?'조건에 맞는 요청이 없습니다.':'아직 읽어온 요청이 없습니다.\nPMS에서 조회한 뒤 목록을 읽어주세요.','list-empty'));
   for(const r of rows){
     const row=el('div',undefined,'request-row'+(r.id===activeId?' selected':''));
+    row.dataset.requestId=r.id;row.classList.toggle('processing',!!activityState.running&&activityState.activeId===r.id);
     row.tabIndex=0;row.setAttribute('role','button');row.setAttribute('aria-label',`${r.title} ${r.id}`);
     const check=el('input');check.type='checkbox';check.checked=selected.has(r.id);check.setAttribute('aria-label',r.id+' 분석 선택');
     check.addEventListener('click',e=>e.stopPropagation());check.addEventListener('change',()=>{check.checked?selected.add(r.id):selected.delete(r.id);drawSelection();});
@@ -58,6 +59,7 @@ function reportNode(analysis){
 }
 async function drawDetail(){
   if(!activeId)return;const id=activeId;const r=await api.detail(id);if(id!==activeId)return;
+  drawChat(r);
   const root=$('detail');root.replaceChildren();
   const heading=el('div',undefined,'detail-heading');heading.append(el('h2',r.title||'요청 상세'),el('span',r.review||'미검토','pill'));root.append(heading,el('code',r.id,'detail-id'));
   if(r.error)root.append(el('div','수집 실패: '+r.error,'warning'));
@@ -78,7 +80,7 @@ function drawSettings(){
   for(const p of settings.projects){const row=el('div',undefined,'project'),check=el('input');check.type='checkbox';check.checked=p.enabled;check.setAttribute('aria-label',p.name+' 분석 사용');check.onchange=()=>run(async()=>{settings=await api['project-toggle']({id:p.id,enabled:check.checked});drawSettings();});const text=el('div');text.append(el('b',p.name),el('code',p.path));row.append(check,text,button('등록 해제',async()=>{settings=await api['project-remove'](p.id);drawSettings();},'text-button'));projects.append(row);}
   $('provider').value=settings.ai.provider;$('endpoint').value=settings.ai.endpoint;$('endpoint').readOnly=settings.ai.provider!=='compatible';$('model').value=settings.ai.model||'';$('api-key').value='';$('key-state').textContent=settings.ai.hasKey?'API 키 저장됨 · 새 키를 입력하지 않으면 기존 키를 유지합니다.':'API 키가 아직 없습니다.';
 }
-async function refresh(){const state=await api.state();settings=state.settings;requests=state.requests;selected=new Set([...selected].filter(id=>requests.some(r=>r.id===id)));$('data-path').textContent=state.dataPath;drawRows();$('model-badge').textContent=settings.ai.model?`${settings.ai.provider} · ${settings.ai.model}`:'AI 연결 전';if(activeId)await drawDetail();}
+async function refresh(){const state=await api.state();settings=state.settings;requests=state.requests;selected=new Set([...selected].filter(id=>requests.some(r=>r.id===id)));$('data-path').textContent=state.dataPath;drawRows();if(state.progress)drawActivity(state.progress);$('model-badge').textContent=settings.ai.model?`${settings.ai.provider} · ${settings.ai.model}`:'AI 연결 전';if(activeId)await drawDetail();updateChatControls();}
 function drawPreview(value){preview=value;$('destination').textContent=`${value.endpoint} · 모델: ${value.model||'설정 필요'}`;const root=$('preview-items');root.replaceChildren();for(const item of value.items){const s=el('section',undefined,'preview-item');s.append(el('code',item.id),el('p',`${item.files.length}개 소스 · 이미지 ${item.images}개 · 소스 ${item.characters.toLocaleString()}자`));if(item.search)s.append(searchNode(item.search));s.append(list(item.files.map(f=>`${f.path} — ${f.reason}${f.truncated?' (발췌)':''}`)));if(item.warnings.length)s.append(el('div',item.warnings.join('\n'),'warning'));if(item.candidates.length)s.append(list(item.candidates));if(item.blocked)s.append(el('b','관련 소스를 찾지 못해 이 요청은 분석에서 제외됩니다.'));root.append(s);} $('analyze').disabled=value.items.every(i=>i.blocked)||!settings.ai.hasKey||!settings.ai.model;$('preview').showModal();}
 document.querySelectorAll('.nav').forEach(b=>b.onclick=()=>{document.querySelectorAll('.nav').forEach(n=>n.classList.toggle('active',n===b));$('requests-page').hidden=b.dataset.page!=='requests';$('settings-page').hidden=b.dataset.page!=='settings';$('page-title').textContent=b.dataset.page==='requests'?'요청 분석':'프로젝트 · AI 설정';if(b.dataset.page==='settings')drawSettings();});
 $('open-pms').onclick=()=>run(()=>api['open-pms']());
@@ -94,5 +96,5 @@ $('provider').onchange=()=>{$('endpoint').value=BASES[$('provider').value];$('en
 $('ai-form').onsubmit=e=>{e.preventDefault();run(async()=>{settings=await api['ai-save']({provider:$('provider').value,endpoint:$('endpoint').value,key:$('api-key').value,model:$('model').value});drawSettings();notice('AI 연결 설정을 저장했습니다. 모델 목록 조회로 키와 연결을 확인할 수 있습니다.');});};
 $('load-models').onclick=()=>run(async()=>{const models=await api.models();$('models').replaceChildren(...models.map(m=>{const o=el('option');o.value=m;return o;}));notice(`${models.length}개 모델을 읽었습니다. 사용할 모델을 선택하고 저장하세요.`);$('model').focus();});
 $('clear-key').onclick=()=>run(async()=>{settings=await api['ai-clear-key']();drawSettings();notice('저장한 API 키를 제거했습니다.');});
-api.onProgress(value=>{$('status').textContent=`${value.phase} · ${value.message}${value.total?` (${value.current}/${value.total})`:''}`;});
+initActivity();initChat();
 run(async()=>{await refresh();drawSettings();});

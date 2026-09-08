@@ -9,19 +9,21 @@ const {runIncremental}=require('./core/incremental.cjs');
 const {indexProjects,buildContext}=require('./core/source.cjs');
 const ai=require('./core/ai.cjs');
 const {Collector,PMS_URL}=require('./pms/collector.cjs');
+const {ProgressTracker}=require('./core/progress.cjs');
 const smoke=process.env.PMS_SMOKE_TEST==='1'&&!app.isPackaged;
 if(!app.isPackaged) app.setPath('userData',path.join(__dirname,'..',smoke?'.test-data/smoke-profile':'.local-data'));
-let window,pmsWindow,store,settings,requests=[],job=null,prepared=null;
+let window,pmsWindow,store,settings,requests=[],job=null,chatJob=null,prepared=null;
 const contexts=new Map();
 const uiFile=path.join(__dirname,'ui','index.html');
 const uiURL=pathToFileURL(uiFile).href;
-const progress=value=>{if(window&&!window.isDestroyed())window.webContents.send('progress',value);};
+const tracker=new ProgressTracker(value=>{if(window&&!window.isDestroyed())window.webContents.send('progress',value);});
+const progress=value=>tracker.update(value);
 const publicSettings=()=>({...settings,ai:{...settings.ai,key:undefined,encryptedKey:undefined,hasKey:!!settings.ai.encryptedKey}});
 function getKey(){if(!settings.ai.encryptedKey)return '';if(!safeStorage.isEncryptionAvailable())throw new Error('Windows 암호화 저장소를 사용할 수 없습니다.');return safeStorage.decryptString(Buffer.from(settings.ai.encryptedKey,'base64'));}
-function idle(){if(job)throw new Error('진행 중인 작업이 있습니다. 완료하거나 중지한 뒤 실행하세요.');}
-function summaries(){return requests.map(({images,text,analysisHistory,...r})=>({...r,imageCount:images?.length||0,historyCount:analysisHistory?.length||0}));}
+function idle(){if(job||chatJob)throw new Error('진행 중인 작업이 있습니다. 완료하거나 중지한 뒤 실행하세요.');}
+function summaries(){return requests.map(({images,text,analysisHistory,chatMessages,analysis,...r})=>({...r,analysis:analysis?{createdAt:analysis.createdAt}:undefined,imageCount:images?.length||0,historyCount:analysisHistory?.length||0}));}
 function invalidate(){prepared=null;contexts.clear();}
-function handle(channel,fn){ipcMain.handle(channel,async(event,arg)=>{if(event.sender!==window.webContents||event.senderFrame!==window.webContents.mainFrame||event.senderFrame.url!==uiURL)throw new Error('허용되지 않은 호출');try{return {ok:true,value:await fn(arg)};}catch(e){return {ok:false,error:e.name==='AbortError'?'작업을 중지했습니다.':e.message};}});}
+function handle(channel,fn){ipcMain.handle(channel,async(event,arg)=>{if(event.sender!==window.webContents||event.senderFrame!==window.webContents.mainFrame||event.senderFrame.url!==uiURL)throw new Error('허용되지 않은 호출');let tracked=false;try{if(['collect','sync','prepare','analyze'].includes(channel)){idle();tracker.begin({collect:'PMS 수집',sync:'자동 분석',prepare:'소스 검색',analyze:'AI 분석'}[channel]);tracked=true;}const value=await fn(arg);if(tracked)tracker.end('완료');return {ok:true,value};}catch(e){if(tracked)tracker.end(e.name==='AbortError'?'중지':'실패',e.message);return {ok:false,error:e.name==='AbortError'?'작업을 중지했습니다.':e.message};}});}
 async function saveRequests(){await store.write('requests',requests);}
 function browserOptions(){return {width:1500,height:980,minWidth:1000,minHeight:700,title:'PMS · 직접 로그인 후 조회',webPreferences:{nodeIntegration:false,contextIsolation:true,sandbox:true,partition:'pms-manual-session'}};}
 async function openPMS(){
@@ -58,9 +60,9 @@ app.whenReady().then(async()=>{
   window=new BrowserWindow({show:!smoke,width:1420,height:960,minWidth:1120,minHeight:750,title:'PMS Manager',backgroundColor:'#f4f6fa',webPreferences:{preload:path.join(__dirname,'preload.cjs'),nodeIntegration:false,contextIsolation:true,sandbox:true}});
   window.webContents.setWindowOpenHandler(()=>({action:'deny'}));
   window.webContents.on('will-navigate',event=>event.preventDefault());
-  window.on('close',event=>{if(job){event.preventDefault();progress({phase:'안내',message:'작업을 중지한 뒤 창을 닫아주세요.'});}});
+  window.on('close',event=>{if(job||chatJob){event.preventDefault();window.webContents.send('progress', {...tracker.snapshot(),message:'작업이나 대화를 중지한 뒤 창을 닫아주세요.'});}});
   window.on('closed',()=>app.quit());
-  handle('state',()=>({settings:publicSettings(),requests:summaries(),dataPath:app.getPath('userData')}));
+  handle('state',()=>({settings:publicSettings(),requests:summaries(),dataPath:app.getPath('userData'),progress:tracker.snapshot()}));
   handle('open-pms',()=>openPMS());
   handle('project-add',async()=>{
     idle();const result=await dialog.showOpenDialog(window,{title:'분석할 프로젝트 소스 폴더 선택',properties:['openDirectory']});
@@ -118,11 +120,13 @@ app.whenReady().then(async()=>{
     job=new AbortController();invalidate();
     try{
       progress({phase:'소스 연결',message:'등록된 프로젝트 폴더를 읽고 있습니다.'});
+      progress({phase:'소스 연결',items:rows.map(r=>({id:r.id,title:r.title,status:'검색 대기'})),activeId:null,batchCurrent:0,batchTotal:rows.length,message:'선택 요청의 소스를 준비합니다.'});
       const index=await indexProjects(settings.projects.filter(p=>p.enabled),job.signal,progress);
       for(const [n,row] of rows.entries()){
-        progress({phase:'소스 연결',message:row.id,current:n+1,total:rows.length});
+        progress({phase:'소스 연결',requestId:row.id,title:row.title,status:'소스 검색 중',message:row.id,batchCurrent:n,batchTotal:rows.length});
         const context=await buildContext(row,index,job.signal,progress);contexts.set(row.id,context);
         if(row.analysis&&row.analysis.contextHash!==context.hash)row.analysisStale=true;
+        progress({phase:'소스 연결',requestId:row.id,status:context.blocked?'관련 소스 확인 필요':'소스 준비 완료',message:`${row.id} · 소스 ${context.files.length}개`,batchCurrent:n+1,batchTotal:rows.length});
       }
       await saveRequests();prepared={token:randomUUID(),ids,config:JSON.stringify(settings.ai)};
       return {token:prepared.token,endpoint:ai.endpoint(settings.ai),model:settings.ai.model,items:rows.map(r=>({id:r.id,images:r.images?.length||0,characters:contexts.get(r.id).files.reduce((n,f)=>n+f.content.length,0),target:contexts.get(r.id).target,search:contexts.get(r.id).search,files:contexts.get(r.id).files.map(f=>({path:`${f.projectName}/${f.relative}`,reason:f.reason,truncated:f.truncated})),blocked:contexts.get(r.id).blocked,warnings:contexts.get(r.id).warnings,candidates:contexts.get(r.id).candidates||[]}))};
@@ -133,22 +137,46 @@ app.whenReady().then(async()=>{
     const key=getKey();if(!key)throw new Error('AI API 키를 먼저 등록하세요.');
     if(!settings.ai.model)throw new Error('AI 모델을 선택하세요.');
     const batch=prepared;prepared=null;job=new AbortController();let failed=0,done=0;
+    progress({phase:'AI 분석',items:batch.ids.map(id=>({id,title:requests.find(r=>r.id===id)?.title,status:'분석 대기'})),batchCurrent:0,batchTotal:batch.ids.length,message:'선택 요청 분석 시작'});
     try{
       for(const [n,id] of batch.ids.entries()){
         job.signal.throwIfAborted();const row=requests.find(r=>r.id===id),context=contexts.get(id);
         if(!needsAnalysis(row))continue;
-        if(context.blocked){failed++;continue;}
-        progress({phase:'AI 분석',message:`${id} · ${settings.ai.model}`,current:n+1,total:batch.ids.length});
+        if(context.blocked){failed++;progress({phase:'AI 분석',requestId:id,status:'관련 소스 확인 필요',message:`${id} · 소스 누락으로 보류`,batchCurrent:n+1,batchTotal:batch.ids.length});continue;}
+        progress({phase:'AI 응답 대기',requestId:id,status:'AI 응답 대기',message:`${id} · ${settings.ai.model} 응답 대기`,batchCurrent:n,batchTotal:batch.ids.length});
         try{
           const result=await ai.analyze(settings.ai,key,row,context,job.signal);
           recordAnalysis(row,result);done++;
         }catch(e){if(job.signal.aborted)throw e;row.analysisError=e.message;failed++;}
-        await saveRequests();progress({phase:'결과 저장',message:id,current:n+1,total:batch.ids.length});
+        await saveRequests();progress({phase:'결과 저장',requestId:id,status:row.analysisError?'분석 실패':'분석 완료',message:`${id} · ${row.analysisError||'분석 완료'}`,batchCurrent:n+1,batchTotal:batch.ids.length});
       }
       return {requests:summaries(),done,failed};
     }finally{job=null;progress({phase:'대기',message:`분석 종료 · 완료 ${done} / 실패·보류 ${failed}`});}
   });
   handle('cancel',()=>{job?.abort(new DOMException('사용자가 중지했습니다.','AbortError'));});
+  handle('chat-cancel',()=>{chatJob?.abort(new DOMException('대화를 중지했습니다.','AbortError'));});
+  handle('chat',async({id,message})=>{
+    if(chatJob)throw new Error('LLM 답변을 기다리고 있습니다.');
+    const row=requests.find(r=>r.id===id);
+    if(!row||row.error)throw new Error('상세 내용을 수집한 요청을 선택하세요.');
+    if(typeof message!=='string'||!message.trim()||message.length>10000)throw new Error('메시지는 1~10,000자로 입력하세요.');
+    const config={...settings.ai},key=getKey();
+    if(!key||!config.model)throw new Error('AI API 키와 모델을 먼저 설정하세요.');
+    const snapshot=structuredClone(row);
+    const context=structuredClone(contexts.get(id)||row.analysis?.context||{target:'소스 미연결',files:[],warnings:['소스 발췌가 없습니다. 소스 검색 후 대화하면 근거를 보완할 수 있습니다.'],hash:null});
+    const user={role:'user',content:message.trim(),createdAt:new Date().toISOString(),contentFingerprint:row.contentFingerprint};
+    const history=(snapshot.chatMessages||[]).slice(-20);
+    chatJob=new AbortController();
+    try{
+      const reply=await ai.chat(config,key,snapshot,context,[...history,user],chatJob.signal);
+      chatJob.signal.throwIfAborted();
+      const current=requests.find(r=>r.id===id);
+      const before=current.chatMessages;
+      current.chatMessages=[...(before||[]),user,reply].slice(-100);
+      try{await saveRequests();}catch(e){current.chatMessages=before;throw e;}
+      return {id,messages:current.chatMessages};
+    }finally{chatJob=null;}
+  });
   handle('review',async({id,note,review})=>{idle();const row=requests.find(r=>r.id===id);if(!row)throw new Error('요청을 찾지 못했습니다.');if(!['미검토','검토 중','채택','보류'].includes(review))throw new Error('검토 상태가 올바르지 않습니다.');row.note=String(note).slice(0,10000);row.review=review;await saveRequests();return summaries();});
   handle('export',async ids=>{
     idle();const rows=requests.filter(r=>ids.includes(r.id));if(!rows.length)throw new Error('내보낼 요청을 선택하세요.');

@@ -67,6 +67,7 @@ async function indexProjects(projects,signal,onProgress=()=>{}) {
   for(const project of projects) {
     signal?.throwIfAborted();
     const root=await fs.realpath(project.path);stats.roots.push({name:project.name,path:root});
+    onProgress({phase:'폴더 탐색',message:`${project.name} · 하위 폴더 탐색 시작`});
     if(!(await fs.stat(root)).isDirectory())throw new Error('소스 경로가 폴더가 아닙니다.');
     async function walk(dir) {
       signal?.throwIfAborted();
@@ -81,6 +82,7 @@ async function indexProjects(projects,signal,onProgress=()=>{}) {
           else await walk(absolute);
         }else if(entry.isFile()) {
           stats.visitedFiles++;
+          if(stats.visitedFiles%500===0){onProgress({phase:'폴더 탐색',message:`${project.name} · 파일 ${stats.visitedFiles.toLocaleString()}개 확인`});await new Promise(resolve=>setImmediate(resolve));}
           const ext=path.extname(entry.name).toLowerCase();
           if((ext&&!EXTENSIONS.has(ext))||/^\.env(?:\.|$)|^(?:credentials?|secrets?)(?:\.|$)|(?:package-lock|pnpm-lock|yarn\.lock)/i.test(entry.name)){note(relative,'바이너리·잠금·비밀설정 또는 미지원 형식');continue;}
           const identity=process.platform==='win32'?absolute.toLowerCase():absolute;

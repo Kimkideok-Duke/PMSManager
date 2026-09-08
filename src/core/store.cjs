@@ -17,7 +17,7 @@ function mergeRequests(previous,incoming){
     const matching=unchanged?[old?.analysis,...(old?.analysisHistory||[])].find(a=>a?.contentFingerprint===fingerprint):null;
     const analysis=matching||old?.analysis;
     const history=matching&&matching!==old?.analysis?[...(old?.analysisHistory||[]).filter(a=>a!==matching),...(old?.analysis?[old.analysis]:[])].slice(-5):old?.analysisHistory||[];
-    map.set(row.id,{...row,contentFingerprint:fingerprint,analyzedContentFingerprints:analyzed,note:old?.note||'',review:old?.review||'미검토',analysis,analysisHistory:history,
+    map.set(row.id,{...row,chatMessages:old?.chatMessages||[],contentFingerprint:fingerprint,analyzedContentFingerprints:analyzed,note:old?.note||'',review:old?.review||'미검토',analysis,analysisHistory:history,
       syncStatus:!fingerprint?'이미지·본문 확인 필요':unchanged?'동일 내용 · 분석 생략':!old?'신규 요청':old.contentFingerprint!==fingerprint?'요청내용 변경':'아직 분석 안 됨',
       analysisStale:!!analysis&&(analysis.contentFingerprint!==fingerprint || !!old?.analysisStale&&analysis===old?.analysis),analysisError:unchanged?undefined:old?.analysisError});
   }

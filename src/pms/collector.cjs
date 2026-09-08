@@ -56,19 +56,22 @@ class Collector {
         const snap=await this.call('snapshot');
         if(original.expected!==snap.expected) throw new Error('수집 중 목록 건수가 바뀌었습니다. 다시 조회하고 실행하세요.');
         for(const row of snap.rows) discovered.set(row.id,row);
+        this.progress({phase:'목록 탐색',message:`조회 목록 ${discovered.size}/${original.expected}건 확인`,current:discovered.size,total:original.expected});
         if(snap.atEnd) break;
         await this.call('scroll','next');
       }
       if(discovered.size!==original.expected) throw new Error(`목록 ${original.expected}건 중 ${discovered.size}건만 읽었습니다. 그리드 스크롤·페이지 상태를 확인하세요. 부분 목록을 전체로 처리하지 않습니다.`);
+      this.progress({phase:'상세 수집',items:[...discovered.values()].map(r=>({id:r.id,title:r.title,status:'수집 대기'})),current:0,total:discovered.size,message:'요청별 본문과 이미지 수집 시작'});
       for(const row of [...discovered.values()].sort((a,b)=>a.rowIndex-b.rowIndex)) {
         signal?.throwIfAborted();
-        this.progress({phase:'수집',message:row.id,current:results.length+1,total:discovered.size});
+        this.progress({phase:'상세 수집',requestId:row.id,title:row.title,status:'상세 수집 중',message:row.id,current:results.length,total:discovered.size});
         try {
           await this.locate(row.id,signal);
           const detail=await this.detail(row.id,signal);
           const images=[],warnings=[];
           if(detail.images.length>12) warnings.push(`이미지 ${detail.images.length}개 중 최대 12개만 수집합니다.`);
           for(const image of detail.images.slice(0,12)) {
+            this.progress({phase:'이미지 수집',requestId:row.id,status:'이미지 수집 중',message:`${row.id} · 이미지 ${images.length+1}/${Math.min(detail.images.length,12)}`,current:images.length,total:Math.min(detail.images.length,12)});
             signal?.throwIfAborted();
             try {
               images.push(await this.loadImage(image,signal));
@@ -80,6 +83,8 @@ class Collector {
           snapshot.fingerprint=contentFingerprint(snapshot);
           results.push(snapshot);
         } catch(e) {if(signal?.aborted) throw e;results.push({...row,error:e.message,collectedAt:new Date().toISOString()});}
+        const result=results[results.length-1];
+        this.progress({phase:'상세 수집',requestId:row.id,status:result.error?'상세 읽기 실패':result.contentComplete?'수집 완료':'이미지·본문 확인 필요',message:`${row.id} · ${result.error?'상세 읽기 실패':result.contentComplete?'수집 완료':'이미지 확인 필요'}`,current:results.length,total:discovered.size});
       }
       return results;
     } finally {
