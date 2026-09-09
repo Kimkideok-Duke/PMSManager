@@ -26,6 +26,23 @@ test('선택 동작은 요청ID 셀만 누르고 저장 버튼을 누르지 않�
 test('부분 목록은 전체 수집으로 완료 처리하지 않는다',async()=>{
   const c=new Collector({});c.call=async()=>({expected:9,rows:[{id}],atEnd:true,scrollTop:0});await assert.rejects(()=>c.collect(),/9건 중 1건/);
 });
+test('전체 건수를 읽으면 잘못된 스크롤 종료값과 관계없이 목록 탐색을 끝낸다',async()=>{
+  const c=new Collector({});let snapshots=0;
+  c.call=async action=>{
+    if(action==='snapshot'){snapshots++;return {expected:1,rows:[{id,rowIndex:0}],atEnd:false,scrollTop:0};}
+    return {ok:true};
+  };
+  c.locate=async()=>{};c.detail=async()=>({text:'본문',images:[]});
+  const rows=await c.collect();assert.equal(rows.length,1);assert.equal(snapshots,2);
+});
+test('목록 스크롤 위치와 행이 반복되면 무한 탐색하지 않고 중단한다',async()=>{
+  const c=new Collector({});let snapshots=0;
+  c.call=async action=>{
+    if(action==='snapshot'){snapshots++;return {expected:4,rows:[{id,rowIndex:0}],atEnd:false,scrollTop:0};}
+    return {ok:true};
+  };
+  await assert.rejects(()=>c.collect(),/스크롤이 이동하지 않습니다/);assert.ok(snapshots<=5);
+});
 test('이미지 외부 URL과 잘못된 데이터 형식을 거절한다',async()=>{
   const c=new Collector({});await assert.rejects(()=>c.loadImage({src:'https://other.example/private.png'}),/PMS 외부/);await assert.rejects(()=>c.loadImage({src:'data:text/html;base64,aGVsbG8='}),/지원하지/);const image=await c.loadImage({src:'data:image/png;base64,aGVsbG8=',alt:'sample'});assert.equal(image.mime,'image/png');assert.equal(image.hash.length,64);
 });

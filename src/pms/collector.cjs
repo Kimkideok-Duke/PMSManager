@@ -20,11 +20,15 @@ class Collector {
   }
   async locate(id,signal) {
     await this.call('scroll',0);
+    let previous='',stalled=0;
     for(let page=0;page<500;page++) {
       await sleep(160,signal);
       const snap=await this.call('snapshot');
       if(snap.rows.some(r=>r.id===id)) return;
       if(snap.atEnd) break;
+      const position=`${snap.scrollTop}|${snap.rows.map(r=>r.id).join('|')}`;
+      stalled=position===previous?stalled+1:0;previous=position;
+      if(stalled>=2) throw new Error('요청 목록 스크롤이 이동하지 않습니다. PMS 그리드를 다시 조회한 뒤 실행하세요.');
       await this.call('scroll','next');
     }
     throw new Error('목록이 변경되어 요청을 찾지 못했습니다. 다시 수집하세요.');
@@ -51,13 +55,20 @@ class Collector {
     if(original.expected>500) throw new Error('한 번에 최대 500건을 수집합니다. PMS 검색조건을 좁혀 다시 조회하세요.');
     try {
       await this.call('scroll',0);
+      let previous='',stalled=0;
       for(let page=0;page<500;page++) {
         await sleep(180,signal);
         const snap=await this.call('snapshot');
         if(original.expected!==snap.expected) throw new Error('수집 중 목록 건수가 바뀌었습니다. 다시 조회하고 실행하세요.');
         for(const row of snap.rows) discovered.set(row.id,row);
         this.progress({phase:'목록 탐색',message:`조회 목록 ${discovered.size}/${original.expected}건 확인`,current:discovered.size,total:original.expected});
+        // Some PMS grids report a non-final scrollbar position even when every
+        // logical row is already rendered. The exact row count is authoritative.
+        if(discovered.size===original.expected) break;
         if(snap.atEnd) break;
+        const position=`${snap.scrollTop}|${snap.rows.map(r=>r.id).join('|')}`;
+        stalled=position===previous?stalled+1:0;previous=position;
+        if(stalled>=2) throw new Error(`요청 목록 스크롤이 이동하지 않습니다. ${discovered.size}/${original.expected}건에서 멈췄습니다. PMS에서 다시 조회하세요.`);
         await this.call('scroll','next');
       }
       if(discovered.size!==original.expected) throw new Error(`목록 ${original.expected}건 중 ${discovered.size}건만 읽었습니다. 그리드 스크롤·페이지 상태를 확인하세요. 부분 목록을 전체로 처리하지 않습니다.`);
