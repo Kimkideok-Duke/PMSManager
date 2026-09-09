@@ -12,7 +12,8 @@ test('유효하지 않은 endpoint와 미설정 모델은 전송 전에 거절�
   assert.throws(()=>buildRequest({provider:'openai',model:''},'key',request,context),/모델/);
 });
 test('모델 인용을 제공된 소스와 행 번호로 검증한다',()=>{
-  const result=parseReport(JSON.stringify({summary:'가설',causes:[{title:'원인',confidence:'높음',fix:'수정',tests:['검증'],evidence:[{path:'P/Main.xfdl',line:1,detail:'valid'},{path:'P/Main.xfdl',line:999},{path:'invented.java',line:1}]}]}),context);
+  const result=parseReport(JSON.stringify({summary:'가설',textFindings:['본문 오류'],imageFindings:['1번 이미지 경고'],causes:[{title:'원인',confidence:'높음',fix:'수정',tests:['검증'],evidence:[{path:'P/Main.xfdl',line:1,detail:'valid'},{path:'P/Main.xfdl',line:999},{path:'invented.java',line:1}]}]}),context);
+  assert.deepEqual(result.textFindings,['본문 오류']);assert.deepEqual(result.imageFindings,['1번 이미지 경고']);
   assert.deepEqual(result.causes[0].evidence.map(e=>e.verified),[true,false,false]);assert.ok(parseReport('not JSON',context).formatWarning);
 });
 test('AI API 응답 저장과 입력 부족 오류를 처리한다',async()=>{

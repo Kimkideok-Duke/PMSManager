@@ -21,13 +21,22 @@ function pageAction(action, arg) {
   const scroller = [...grid.querySelectorAll('[data-role="scroll-container"],div')].filter(e=>e.scrollHeight>e.clientHeight+2 && e.clientHeight>40 && (/auto|scroll/.test(getComputedStyle(e).overflowY) || (e.matches('[data-role="scroll-container"]') && e.closest('.cl-grid-detail')))).sort((a,b)=>b.scrollHeight-a.scrollHeight)[0];
   const horizontal = [...grid.querySelectorAll('[data-role="scroll-container"],div')].filter(e=>e.scrollWidth>e.clientWidth+2 && e.clientWidth>100 && (/auto|scroll/.test(getComputedStyle(e).overflowX) || (e.matches('[data-role="scroll-container"]') && e.closest('.cl-grid-detail')))).sort((a,b)=>b.scrollWidth-a.scrollWidth)[0];
   function getEditors() {
-    const result=[];
-    function visit(doc,depth) {
+    const candidates=[];
+    function visit(doc,depth,hostFrame) {
       if(!doc||depth>6)return;
-      if(/smart_editor2_inputarea\.html/i.test(doc.URL))result.push(doc);
-      for(const frame of doc.querySelectorAll('iframe')){if(!frame.getClientRects().length)continue;try{visit(frame.contentDocument,depth+1);}catch{}}
+      if(doc!==document) {
+        const frameName=`${hostFrame?.id||''} ${hostFrame?.name||''} ${hostFrame?.title||''}`;
+        const body=doc.body,hasContent=!!body&&!!((body.innerText||body.textContent||'').trim()||body.querySelector?.('img'));
+        let score=depth+(hasContent?10:0);
+        if(/smart_editor2_inputarea\.html/i.test(doc.URL||''))score+=100;
+        if(/\bse2_iframe\b/i.test(frameName))score+=90;
+        if(body?.isContentEditable||String(doc.designMode).toLowerCase()==='on')score+=40;
+        if(/smart editor|wysiwyg/i.test(`${doc.title||''} ${frameName}`))score+=20;
+        if(score>=30)candidates.push({doc,score,depth});
+      }
+      for(const frame of doc.querySelectorAll('iframe')){if(!frame.getClientRects().length)continue;try{visit(frame.contentDocument,depth+1,frame);}catch{}}
     }
-    visit(document,0);return result;
+    visit(document,0,null);return candidates.sort((a,b)=>b.score-a.score||b.depth-a.depth).map(c=>c.doc);
   }
   if (action === 'select') {
     const row = allRows.find(r => [...r.querySelectorAll('[role="gridcell"]')].some(c => cellText(c) === arg));
@@ -58,18 +67,18 @@ function pageAction(action, arg) {
   const detailLabel = [...document.querySelectorAll('.cl-text')].filter(visible).find(e=>/^REQ_ID\s*:\s*REQ-/i.test(e.textContent.trim()));
   const detailId = detailLabel?.textContent.match(/REQ_ID\s*:\s*(REQ-\S+)/i)?.[1] || '';
   const editors = getEditors();
-  const editor = editors.length===1 ? editors[0] : null;
+  const editor = editors[0]||null;
   const capture=globalThis.__pmsCapture;
   if(capture && editor && (capture.body!==editor.body||capture.html!==editor.body.innerHTML))capture.changed=true;
-  const images = editor ? [...editor.images].map(img=>({src:img.currentSrc||img.src,alt:img.alt||'',width:img.naturalWidth,height:img.naturalHeight})) : [];
+  const images = editor ? [...editor.body.querySelectorAll('img')].map(img=>({src:img.currentSrc||img.src,alt:img.alt||'',width:img.naturalWidth,height:img.naturalHeight})) : [];
   const busy=[...document.querySelectorAll('.cl-text,[role="alert"],[role="status"]')].filter(visible).some(e=>/처리\s*중입니다|잠시만\s*기다려\s*주세요/.test(e.textContent||''));
   return {
     rows,visibleRows,expected:Math.max(0,Number(grid.getAttribute('aria-rowcount')||0)-1),
     scrollTop:scroller?.scrollTop||0,scrollLeft:horizontal?.scrollLeft||0,atEnd:!scroller || scroller.scrollTop+scroller.clientHeight>=scroller.scrollHeight-2,
     selectedId:rows.find(r=>allRows.some(e=>Number(e.getAttribute('data-rowindex'))===r.rowIndex && e.getAttribute('aria-selected')==='true'))?.id,
-    detailId,text:editor?.body.innerText||'',images,editorReady:!!editor,busy,
+    detailId,text:editor?(editor.body.innerText||editor.body.textContent||''):'',images,editorReady:!!editor,busy,
     editorUpdated:!capture||capture.id!==detailId||capture.alreadySelected||capture.changed,
-    editorError:editors.length>1?'요청내용 편집기가 여러 개입니다. 다른 요청 화면을 닫으세요.':''
+    editorError:''
   };
 }
 module.exports = {pageAction};

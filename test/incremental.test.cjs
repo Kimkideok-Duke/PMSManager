@@ -42,5 +42,16 @@ test('부분 이미지와 식별 불가능한 이미지는 완료 해시를 만�
 test('취소 시 완료 결과를 보존하고 다음 요청은 호출하지 않는다',async()=>{
  const controller=new AbortController();let saved=[],count=0;
  await assert.rejects(()=>batch([],[row(),row('둘','REQ-ec/Two.xfdl1')],{signal:controller.signal,save:async rows=>{saved=structuredClone(rows);if(rows[0].analysis)controller.abort();},analyze:async()=>{count++;return {report:{}};}}),{name:'AbortError'});
- assert.equal(count,1);assert.ok(saved[0].analysis);assert.equal(saved[1].analysis,undefined);
+ assert.equal(count,1);assert.ok(saved[0].analysis);assert.equal(saved.find(r=>r.id==='REQ-ec/Two.xfdl1'),undefined);
+});
+test('각 PMS 행은 상세 저장과 분석을 완료한 뒤 다음 행으로 넘어간다',async()=>{
+ const events=[],incoming=[row('첫 요청'),row('둘째 요청','REQ-ec/Two.xfdl1')];let saved=[];
+ const result=await runIncremental({previous:[],collect:async(_signal,onItem)=>{
+  for(const [i,item] of incoming.entries()){
+   events.push('선택 '+item.id);await onItem(item,i+1,incoming.length);
+   assert.ok(saved.find(r=>r.id===item.id)?.analysis);events.push('완료 '+item.id);
+  }
+  return incoming;
+ },createIndex:async()=>({}),buildContext:async()=>({blocked:false,files:[]}),analyze:async item=>{events.push('분석 '+item.id);return {report:{summary:item.text}};},save:async rows=>{saved=structuredClone(rows);}});
+ assert.equal(result.done,2);assert.deepEqual(events,[`선택 ${incoming[0].id}`,`분석 ${incoming[0].id}`,`완료 ${incoming[0].id}`,`선택 ${incoming[1].id}`,`분석 ${incoming[1].id}`,`완료 ${incoming[1].id}`]);
 });

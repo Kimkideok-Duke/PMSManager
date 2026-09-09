@@ -49,6 +49,7 @@ function reportNode(analysis){
   if(r.raw){s.append(el('pre',r.raw));return s;}
   s.append(el('div',r.summary,'report-summary'));
   if(analysis.search)s.append(searchNode(analysis.search));
+  if(r.textFindings?.length){const text=section('요청 본문에서 확인한 내용');text.append(list(r.textFindings));s.append(text);}
   if(r.executionFlow?.length){const flow=section('관련 코드의 처리 흐름');flow.append(list(r.executionFlow));s.append(flow);}
   if(r.imageFindings?.length){const image=section('이미지에서 확인한 내용');image.append(list(r.imageFindings));s.append(image);}
   for(const c of r.causes||[]){const cause=el('div',undefined,'cause');cause.append(el('h3',`${c.title} · 가설 신뢰도 ${c.confidence}`),el('p',c.fix));for(const e of c.evidence||[]){const evidence=el('div',undefined,'evidence');evidence.append(el('code',`${e.path}:${e.line} · ${e.verified?'제공된 줄 확인':'근거 위치 미확인'}`),el('div',e.detail));cause.append(evidence);}if(c.tests?.length){cause.append(el('h3','검증 절차'),list(c.tests));}s.append(cause);}

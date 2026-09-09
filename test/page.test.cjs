@@ -4,8 +4,8 @@ const {JSDOM}=require('jsdom');
 const {pageAction}=require('../src/pms/page.cjs');
 const {Collector}=require('../src/pms/collector.cjs');
 const id='REQ-ec/Main.xfdl1',second='REQ-ec/Other.xfdl2';
-function page(){
-  const dom=new JSDOM(`<div class="cl-text" id="detail">REQ_ID : ${id}</div><div role="grid" aria-rowcount="3"><div role="row">메뉴명 요청ID</div>${[id,second].map((value,i)=>`<div role="row" data-rowindex="${i}" aria-selected="${i===0}"><div role="gridcell" data-cellindex="4">화면${i}</div><div role="gridcell" data-cellindex="5">오류</div><div role="gridcell" data-cellindex="9"><input value="등록"></div><div role="gridcell" data-cellindex="13">${value}</div></div>`).join('')}</div><iframe src="/smart_editor2_inputarea.html"></iframe>`,{url:'https://ntest.daewooenc.com/expms/index.do',runScripts:'outside-only'});
+function page(editorPath='/smart_editor2_inputarea.html',editorAttribute=''){
+  const dom=new JSDOM(`<div class="cl-text" id="detail">REQ_ID : ${id}</div><div role="grid" aria-rowcount="3"><div role="row">메뉴명 요청ID</div>${[id,second].map((value,i)=>`<div role="row" data-rowindex="${i}" aria-selected="${i===0}"><div role="gridcell" data-cellindex="4">화면${i}</div><div role="gridcell" data-cellindex="5">오류</div><div role="gridcell" data-cellindex="9"><input value="등록"></div><div role="gridcell" data-cellindex="13">${value}</div></div>`).join('')}</div><iframe ${editorAttribute} src="${editorPath}"></iframe>`,{url:'https://ntest.daewooenc.com/expms/index.do',runScripts:'outside-only'});
   const w=dom.window;w.HTMLElement.prototype.getClientRects=function(){return [{}];};
   Object.defineProperty(w.HTMLElement.prototype,'innerText',{get(){return this.textContent;}});
   const doc=w.document.querySelector('iframe').contentDocument;doc.open();doc.write('<html><body><p>저장 오류</p><img src="data:image/png;base64,aGVsbG8="></body></html>');doc.close();
@@ -15,6 +15,9 @@ function page(){
 }
 test('실제 PMS와 같은 그리드·편집기 DOM에서 본문·이미지·전체 건수를 읽는다',()=>{
   const {dom,call}=page();const snap=call('snapshot');assert.equal(snap.expected,2);assert.equal(snap.rows.length,2);assert.equal(snap.visibleRows.length,2);assert.equal(snap.rows[0].status,'등록');assert.equal(snap.detailId,id);assert.equal(snap.text,'저장 오류');assert.equal(snap.images.length,1);dom.window.close();
+});
+test('Smart Editor 주소가 달라도 se2_iframe의 본문과 사진을 찾는다',()=>{
+ const {dom,call}=page('/custom-wysiwyg.html','id="se2_iframe"');const snap=call('snapshot');assert.equal(snap.editorReady,true);assert.equal(snap.text,'저장 오류');assert.equal(snap.images.length,1);dom.window.close();
 });
 test('요청ID 열이 가상화되어도 화면에 보이는 행 정보는 유지한다',()=>{
   const {dom,w,call}=page();w.document.querySelector('[data-rowindex="1"] [data-cellindex="13"]').remove();

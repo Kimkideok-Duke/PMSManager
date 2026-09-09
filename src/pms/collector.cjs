@@ -51,7 +51,7 @@ class Collector {
     }
     throw new Error(`상세 읽기 대기시간을 초과했습니다. 상세ID=${lastSnap.detailId||'없음'}, 편집기=${lastSnap.editorReady?'확인':'없음'}, PMS처리중=${lastSnap.busy?'예':'아니오'}`);
   }
-  async collect(signal) {
+  async collect(signal,onItem) {
     const original=await this.call('snapshot');
     const discovered=new Map(),results=[];
     if(!original.expected && !original.rows.length) return [];
@@ -115,6 +115,7 @@ class Collector {
           results.push(snapshot);
         } catch(e) {if(signal?.aborted) throw e;results.push({...row,error:e.message,collectedAt:new Date().toISOString()});}
         const result=results[results.length-1];
+        if(onItem)await onItem(result,results.length,discovered.size);
         this.progress({phase:'상세 수집',requestId:row.id,status:result.error?'상세 읽기 실패':result.contentComplete?'수집 완료':'이미지·본문 확인 필요',message:`${row.id} · ${result.error?'상세 읽기 실패':result.contentComplete?'수집 완료':'이미지 확인 필요'}`,current:results.length,total:discovered.size});
       }
       return results;

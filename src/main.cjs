@@ -42,6 +42,7 @@ function markdownFor(row){
   const a=row.analysis,r=a?.report;
   const lines=[`# ${row.id}`,row.title||'',`수집: ${row.collectedAt||'-'}`,`검토: ${row.review||'미검토'}`,`메모: ${row.note||''}`,'','## 요청내용',row.text||''];
   if(a){lines.push('','## 분석',`${a.provider} / ${a.model} · ${a.createdAt}`,row.analysisStale?'이 결과는 이전 자료에 기반합니다. 다시 분석하세요.':'',r.summary||r.raw||'');
+    for(const finding of r.textFindings||[])lines.push(`- 본문 관찰: ${finding}`);
     for(const finding of r.imageFindings||[])lines.push(`- 이미지 관찰: ${finding}`);
     if(a.search)lines.push('',`검색 범위: 하위 파일 ${a.search.indexedFiles}개 내용 색인 / ${a.search.selectedFiles}개 소스 발췌`);
     if(r.executionFlow?.length)lines.push('','### 코드 처리 흐름',...r.executionFlow.map(s=>`- ${s}`));
@@ -98,7 +99,7 @@ app.whenReady().then(async()=>{
     job=new AbortController();invalidate();
     try{
       const result=await runIncremental({previous:requests,signal:job.signal,progress,
-        collect:signal=>new Collector(pmsWindow.webContents,progress).collect(signal),
+        collect:(signal,onItem)=>new Collector(pmsWindow.webContents,progress).collect(signal,onItem),
         createIndex:signal=>{
           if(!getKey()||!settings.ai.model)throw new Error('요청내용은 저장했습니다. AI API 키와 모델을 설정한 뒤 다시 실행하세요.');
           return indexProjects(settings.projects.filter(p=>p.enabled),signal,progress);

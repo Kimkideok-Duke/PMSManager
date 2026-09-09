@@ -17,8 +17,8 @@
 <main>
   <header><div><div class="eyebrow">PROJECT INTELLIGENCE</div><h1 id="page-title">요청 분석</h1></div><div class="header-actions"><span id="model-badge" class="badge">AI 연결 전</span><button id="open-pms" class="button dark">PMS 열기 ↗</button></div></header>
   <section id="requests-page">
-    <div class="workflow"><div><span>01</span><section><b>PMS에서 직접 조회</b><p>로그인 → 검색조건 입력 → 조회</p></section></div><div><span>02</span><section><b>각 행의 상세내용 비교</b><p>본문·이미지가 동일하면 분석 생략</p></section></div><div><span>03</span><section><b>신규·변경 내용 자동 분석</b><p>하위 소스 검색 후 수정 방향 도출</p></section></div></div>
-    <p class="hint">PMS에서 조회한 목록의 각 행을 직접 선택해 상세 본문·이미지를 읽습니다. 새 내용과 아직 분석하지 못한 내용만 등록된 하위 소스와 함께 설정한 AI API로 전송합니다. 다음 조회 후 다시 실행해도 동일 내용은 생략합니다.</p><div class="collection-bar"><label class="check"><input id="ready" type="checkbox"> PMS 로그인과 검색조건 입력·조회를 완료했습니다</label><button id="collect" class="button primary">신규·변경 내용 자동 분석</button></div>
+    <div class="workflow"><div><span>01</span><section><b>PMS에서 직접 조회</b><p>로그인 → 검색조건 입력 → 조회</p></section></div><div><span>02</span><section><b>요청 하나씩 상세 읽기</b><p>본문과 사진을 즉시 저장·비교</p></section></div><div><span>03</span><section><b>요청별 분석 완료</b><p>하위 소스에서 수정 위치와 방향 도출</p></section></div></div>
+    <p class="hint">PMS 요청내역을 하나씩 선택합니다. 선택한 요청의 본문과 사진을 읽고 관련 하위 소스와 AI 분석 결과까지 저장한 다음 다음 요청으로 넘어갑니다. 이미 분석한 동일 내용은 생략합니다.</p><div class="collection-bar"><label class="check"><input id="ready" type="checkbox"> PMS 로그인과 검색조건 입력·조회를 완료했습니다</label><button id="collect" class="button primary">요청별 상세 읽기·소스 분석 실행</button></div>
     <div class="stats"><div><small>전체 요청</small><strong id="stat-total">0</strong></div><div><small>분석 완료</small><strong id="stat-done">0</strong></div><div><small>검토 대기</small><strong id="stat-review">0</strong></div><div><small>다시 확인</small><strong id="stat-error">0</strong></div></div>
     <section class="activity panel" aria-label="실시간 작업 현황">
       <div class="activity-heading"><div><b id="activity-phase">작업 대기</b><p id="activity-current">분석을 시작하면 현재 요청과 진행 단계가 표시됩니다.</p></div><span id="activity-elapsed">00:00</span></div>
