@@ -35,18 +35,21 @@ class Collector {
   }
   async detail(id,signal) {
     await this.call('select',id);
-    // Detail header and editor load separately. Require a stable body after a minimum settling period.
-    const start=Date.now();let last='',stable=0;
+    // The PMS accessibility selection flag and editor mutation events are not
+    // reliable. Trust the exact detail header after the loading overlay clears,
+    // then require a stable editor body before collecting it.
+    const start=Date.now();let last='',stable=0,lastSnap={};
     while(Date.now()-start<18000) {
       await sleep(350,signal);
       const snap=await this.call('snapshot');
+      lastSnap=snap;
       if(snap.editorError) throw new Error(snap.editorError);
-      if(snap.detailId!==id || snap.selectedId!==id || !snap.editorReady || !snap.editorUpdated) {stable=0;continue;}
+      if(snap.detailId!==id || !snap.editorReady || snap.busy) {stable=0;last='';continue;}
       const key=digest(JSON.stringify([snap.text,snap.images]));
       stable=key===last?stable+1:0;last=key;
       if(stable>=3 && Date.now()-start>=1500) return snap;
     }
-    throw new Error('요청ID와 상세 내용이 일치하는 상태를 확인하지 못했습니다.');
+    throw new Error(`상세 읽기 대기시간을 초과했습니다. 상세ID=${lastSnap.detailId||'없음'}, 편집기=${lastSnap.editorReady?'확인':'없음'}, PMS처리중=${lastSnap.busy?'예':'아니오'}`);
   }
   async collect(signal) {
     const original=await this.call('snapshot');
@@ -54,21 +57,38 @@ class Collector {
     if(!original.expected && !original.rows.length) return [];
     if(original.expected>500) throw new Error('한 번에 최대 500건을 수집합니다. PMS 검색조건을 좁혀 다시 조회하세요.');
     try {
+      const metadata=new Map();
+      await this.call('columns','start');
       await this.call('scroll',0);
       let previous='',stalled=0;
       for(let page=0;page<500;page++) {
         await sleep(180,signal);
         const snap=await this.call('snapshot');
         if(original.expected!==snap.expected) throw new Error('수집 중 목록 건수가 바뀌었습니다. 다시 조회하고 실행하세요.');
-        for(const row of snap.rows) discovered.set(row.id,row);
-        this.progress({phase:'목록 탐색',message:`조회 목록 ${discovered.size}/${original.expected}건 확인`,current:discovered.size,total:original.expected});
+        for(const row of snap.visibleRows||snap.rows) metadata.set(row.rowIndex,row);
+        this.progress({phase:'목록 탐색',message:`조회 목록 정보 ${metadata.size}/${original.expected}건 확인`,current:metadata.size,total:original.expected});
         // Some PMS grids report a non-final scrollbar position even when every
         // logical row is already rendered. The exact row count is authoritative.
+        if(metadata.size===original.expected) break;
+        if(snap.atEnd) break;
+        const position=`${snap.scrollTop}|${(snap.visibleRows||snap.rows).map(r=>r.rowIndex).join('|')}`;
+        stalled=position===previous?stalled+1:0;previous=position;
+        if(stalled>=2) throw new Error(`요청 목록 세로 스크롤이 이동하지 않습니다. ${metadata.size}/${original.expected}건에서 멈췄습니다. PMS에서 다시 조회하세요.`);
+        await this.call('scroll','next');
+      }
+      await this.call('columns','id');
+      await this.call('scroll',0);previous='';stalled=0;
+      for(let page=0;page<500;page++) {
+        await sleep(180,signal);
+        const snap=await this.call('snapshot');
+        if(original.expected!==snap.expected) throw new Error('수집 중 목록 건수가 바뀌었습니다. 다시 조회하고 실행하세요.');
+        for(const row of snap.rows) discovered.set(row.id,{...(metadata.get(row.rowIndex)||{}),...row});
+        this.progress({phase:'목록 탐색',message:`요청ID ${discovered.size}/${original.expected}건 확인`,current:discovered.size,total:original.expected});
         if(discovered.size===original.expected) break;
         if(snap.atEnd) break;
         const position=`${snap.scrollTop}|${snap.rows.map(r=>r.id).join('|')}`;
         stalled=position===previous?stalled+1:0;previous=position;
-        if(stalled>=2) throw new Error(`요청 목록 스크롤이 이동하지 않습니다. ${discovered.size}/${original.expected}건에서 멈췄습니다. PMS에서 다시 조회하세요.`);
+        if(stalled>=2) throw new Error(`요청ID 열을 읽는 중 세로 스크롤이 이동하지 않습니다. ${discovered.size}/${original.expected}건에서 멈췄습니다.`);
         await this.call('scroll','next');
       }
       if(discovered.size!==original.expected) throw new Error(`목록 ${original.expected}건 중 ${discovered.size}건만 읽었습니다. 그리드 스크롤·페이지 상태를 확인하세요. 부분 목록을 전체로 처리하지 않습니다.`);
@@ -101,6 +121,7 @@ class Collector {
     } finally {
       try {
         if(original.selectedId) {await this.locate(original.selectedId);await this.call('select',original.selectedId);}
+        await this.call('columns',original.scrollLeft||0);
         await this.call('scroll',original.scrollTop);
       } catch {this.progress({phase:'수집',message:'원래 선택 행 복원에 실패했습니다. PMS 화면을 확인하세요.'});}
     }
