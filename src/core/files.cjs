@@ -4,12 +4,23 @@ const crypto = require('node:crypto');
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 const slash = value => value.replaceAll('\\', '/');
 
-function requestPath(id) {
-  const match = /^REQ-([A-Za-z0-9_./\\-]+)\.xfdl([^\s]*)$/i.exec(String(id).trim());
-  if (!match) throw new Error('요청ID에서 REQ- … .xfdl 경로를 찾을 수 없습니다.');
+function parseRequestId(id) {
+  const raw = String(id).trim();
+  const match = /^REQ-([A-Za-z0-9_./\\-]+)\.(xfdl|clx|xml|jsp)([^\s]*)$/i.exec(raw) ||
+                /^REQ-([A-Za-z0-9_./\\-]+)$/i.exec(raw);
+  if (!match) throw new Error('요청ID에서 REQ- 화면 경로를 찾을 수 없습니다.');
   const relative = slash(match[1]);
-  if (relative.startsWith('/') || relative.split('/').some(p => !p || p === '.' || p === '..')) throw new Error('요청ID에 허용되지 않는 경로가 있습니다.');
-  return relative + '.xfdl';
+  if (relative.startsWith('/') || relative.split('/').some(p => !p || p === '.' || p === '..')) {
+    throw new Error('요청ID에 허용되지 않는 경로가 있습니다.');
+  }
+  const ext = match[2] ? '.' + match[2].toLowerCase() : '.xfdl';
+  const screenId = path.posix.basename(relative);
+  return { relative, ext, screenId, raw };
+}
+
+function requestPath(id) {
+  const info = parseRequestId(id);
+  return info.relative + info.ext;
 }
 
 function redact(text) {
@@ -63,4 +74,4 @@ function excerpts(text, needles, limit) {
   const lineNumbers=[...selected].sort((a,b)=>a-b).map(i=>i+1);
   return {content:lineNumbers.map(n=>`${n}: ${lines[n-1]}`).join('\n'),lineNumbers,totalLines:lines.length,truncated:lineNumbers.length!==lines.length};
 }
-module.exports={requestPath,readSource,redact,digest,slash,excerpts};
+module.exports={parseRequestId,requestPath,readSource,redact,digest,slash,excerpts};

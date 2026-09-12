@@ -43,3 +43,21 @@ test('동시 저장은 순서대로 반영하며 손상된 파일을 무시하�
   const root=await fixture(t),store=new Store(root);await Promise.all([store.write('test',{version:1}),store.write('test',{version:2})]);assert.equal((await store.read('test')).version,2);
   await fs.writeFile(path.join(root,'test.json'),'{bad');await assert.rejects(()=>store.read('test',{}),/덮어쓰지/);
 });
+test('요청ID의 화면ID를 기반으로 clx, js, java, sql 소스를 연결한다',async t=>{
+  const root=await fixture(t);
+  await fs.mkdir(path.join(root,'src/ec/ecj'),{recursive:true});
+  await fs.mkdir(path.join(root,'server/controller'),{recursive:true});
+  await fs.mkdir(path.join(root,'server/mapper'),{recursive:true});
+  await fs.writeFile(path.join(root,'src/ec/ecj/ECJ0502.clx'),'<cl:submission id="subList" action="/ec/ecj/selectList.do"/><cl:listener name="click" handler="onLoadClick"/>');
+  await fs.writeFile(path.join(root,'src/ec/ecj/ECJ0502.clx.js'),'function onLoadClick() { app.lookup("subList").send(); }');
+  await fs.writeFile(path.join(root,'server/controller/ECJ0502Controller.java'),'@RequestMapping("/ec/ecj/selectList.do") public String selectList() { return "ok"; }');
+  await fs.writeFile(path.join(root,'server/mapper/ECJ0502Mapper.xml'),'<mapper namespace="ECJ0502Mapper"><select id="selectECJ0502">SELECT * FROM ECJ0502_TB</select></mapper>');
+  const index=await indexProjects([{id:'p',name:'Project',path:root}]);
+  assert.equal(index.files.length,4);
+  const context=await buildContext({id:'REQ-ec/ecj/ECJ0502.xfdl5',text:'load시 조회 안됨'},index);
+  assert.equal(context.blocked,false);
+  const paths=context.files.map(f=>f.relative);
+  assert.ok(paths.some(p=>p.endsWith('ECJ0502.clx')));
+  assert.ok(paths.some(p=>p.endsWith('ECJ0502.clx.js')));
+  assert.ok(paths.some(p=>p.endsWith('ECJ0502Controller.java')));
+});

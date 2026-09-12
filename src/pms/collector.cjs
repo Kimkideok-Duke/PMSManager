@@ -35,16 +35,15 @@ class Collector {
   }
   async detail(id,signal) {
     await this.call('select',id);
-    // The PMS accessibility selection flag and editor mutation events are not
-    // reliable. Trust the exact detail header after the loading overlay clears,
-    // then require a stable editor body before collecting it.
+    // Trust the exact detail header when available, or accept stable editor content.
     const start=Date.now();let last='',stable=0,lastSnap={};
     while(Date.now()-start<18000) {
       await sleep(350,signal);
       const snap=await this.call('snapshot');
       lastSnap=snap;
       if(snap.editorError) throw new Error(snap.editorError);
-      if(snap.detailId!==id || !snap.editorReady || snap.busy) {stable=0;last='';continue;}
+      const idMatch = !snap.detailId || snap.detailId === id;
+      if(!idMatch || !snap.editorReady || snap.busy) {stable=0;last='';continue;}
       const key=digest(JSON.stringify([snap.text,snap.images]));
       stable=key===last?stable+1:0;last=key;
       if(stable>=3 && Date.now()-start>=1500) return snap;
@@ -135,7 +134,8 @@ class Collector {
       mime=m[1];bytes=Buffer.from(m[2],'base64');
     } else {
       const url=new URL(image.src);
-      if(url.origin!==PMS_ORIGIN) throw new Error('PMS 외부의 이미지 주소입니다.');
+      const isAllowed = url.origin === PMS_ORIGIN || (url.hostname.endsWith('daewooenc.com') && url.protocol === 'https:');
+      if(!isAllowed) throw new Error('PMS 외부의 이미지 주소입니다.');
       const response=await this.contents.session.fetch(url.href,{signal,redirect:'error'});
       if(!response.ok) throw new Error(`HTTP ${response.status}`);
       mime=response.headers.get('content-type')?.split(';')[0];

@@ -6,7 +6,7 @@ function normalizeText(value) {
 function completeContent(row) {
   return !row.error && row.contentComplete!==false && typeof row.text==='string' && Array.isArray(row.images)
     && row.images.every(image=>!!image.data || typeof image.hash==='string' && image.hash.length===64)
-    && !(row.warnings||[]).some(w=>/이미지.*(?:실패|최대)/.test(w));
+    && !(row.warnings||[]).some(w=>/이미지.*(?:실패|누락)/.test(w));
 }
 function contentFingerprint(row) {
   if(!completeContent(row))return null;

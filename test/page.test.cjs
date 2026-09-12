@@ -78,3 +78,14 @@ test('수집기는 모든 요청ID 셀을 선택하고 그 행의 상세 본문�
  const collector=new Collector({isDestroyed:()=>false,getURL:()=>w.location.href,executeJavaScriptInIsolatedWorld:async(_world,scripts)=>w.eval(scripts[0].code)});
  try{const rows=await collector.collect();assert.equal(rows.length,2);for(const r of rows){assert.equal(r.text,r.id+' 상세');assert.equal(r.images.length,1);assert.equal(r.contentComplete,true);assert.ok(selected.includes(r.id));}}finally{dom.window.close();}
 });
+test('eXbuilder6 cl-output 라벨과 메인 DOM contenteditable 에디터에서도 본문과 사진을 읽는다',()=>{
+  const dom=new JSDOM(`<div class="cl-output" id="detail">REQ_ID : REQ-ec/ecj/ECJ0502.xfdl5</div><div role="grid" aria-rowcount="2"><div role="row">메뉴명 요청ID</div><div role="row" data-rowindex="0" aria-selected="true"><div role="gridcell" data-cellindex="4">심의결과</div><div role="gridcell" data-cellindex="5">권한</div><div role="gridcell" data-cellindex="9">등록</div><div role="gridcell" data-cellindex="12">REQ-ec/ecj/ECJ0502.xfdl5</div></div></div><div contenteditable="true"><p>load시 조회 안됨</p><img src="data:image/png;base64,aGVsbG8="></div>`,{url:'https://ntest.daewooenc.com/expms/index.do',runScripts:'outside-only'});
+  const w=dom.window;w.HTMLElement.prototype.getClientRects=function(){return [{}];};
+  const call=(action,arg)=>w.eval(`(${pageAction.toString()})(${JSON.stringify(action)},${JSON.stringify(arg??null)})`);
+  const snap=call('snapshot');
+  assert.equal(snap.detailId,'REQ-ec/ecj/ECJ0502.xfdl5');
+  assert.equal(snap.text,'load시 조회 안됨');
+  assert.equal(snap.images.length,1);
+  assert.equal(snap.editorReady,true);
+  dom.window.close();
+});

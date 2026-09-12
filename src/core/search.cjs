@@ -1,8 +1,8 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const {requestPath,readSource,redact,digest,slash,excerpts} = require('./files.cjs');
+const {parseRequestId,requestPath,readSource,redact,digest,slash,excerpts} = require('./files.cjs');
 
-const EXTENSIONS = new Set(('.xfdl .xjs .js .mjs .cjs .ts .tsx .jsx .java .kt .kts .xml .sql .ddl .jsp .jspx .properties .vue .svelte .html .htm .css .scss .less .cs .cshtml .vb .py .go .rs .c .h .cpp .hpp .php .rb .json .yaml .yml .toml .ini .config .conf .txt .md .gradle .prisma .graphql .gql').split(' '));
+const EXTENSIONS = new Set(('.clx .xfdl .xjs .js .mjs .cjs .ts .tsx .jsx .java .kt .kts .xml .sql .ddl .jsp .jspx .properties .vue .svelte .html .htm .css .scss .less .cs .cshtml .vb .py .go .rs .c .h .cpp .hpp .php .rb .json .yaml .yml .toml .ini .config .conf .txt .md .gradle .prisma .graphql .gql').split(' '));
 const EXCLUDED = new Set(['.git','.svn','node_modules','target','build','dist','.idea','.metadata','.gradle','coverage','bin','obj','.next','.nuxt','.venv','venv','__pycache__']);
 const STOP = new Set(('this form self public private protected static final return class interface extends implements new function const let var if else null true false undefined string number boolean object void int long double float import from package export default include select update insert delete into where join table values set get save load open close error message data value name type text id row col div span input button script style xmlns http https www com org java util system console log promise async await function onload onclick transaction addrow application encoding version utf-8 json xml xfdl java sql js ts').split(' '));
 const LIMITS = {files:75000,postings:3000000,termsPerFile:30000,contextFiles:40,contextChars:240000,depth:5};
@@ -35,7 +35,7 @@ function symbols(text) {
   }
   for(const m of text.matchAll(/["']([^"'\r\n]{3,180})["']/g)) {
     const value=m[1];
-    if(/^[\w./:\\-]+\.(?:xfdl|xjs|js|ts|java|xml|sql|py|cs|vue|jsp)$/i.test(value)) {
+    if(/^[\w./:\\-]+\.(?:clx|xfdl|xjs|js|ts|java|xml|sql|py|cs|vue|jsp)$/i.test(value)) {
       ref(value,'파일 참조',16);ref(path.posix.basename(value.replaceAll('::','/')),'파일 참조',16);
     }else if(/^[\w./:\\-]+$/.test(value)&&/[./:]/.test(value)) {
       ref(value,'API·매퍼 식별자',12);
@@ -44,6 +44,16 @@ function symbols(text) {
   }
   for(const m of text.matchAll(/\b(?:from|join|update|into)\s+([\w$.]+)/gi))ref(m[1],'SQL 테이블',10);
   for(const m of text.matchAll(/\bimport\s+(?:static\s+)?([\w.]+)/g))ref(m[1].split('.').pop(),'import 참조',10);
+  for(const m of text.matchAll(/<cl:submission\b[^>]*\baction\s*=\s*["']([^"']+)["']/gi)) {
+    ref(m[1],'Submission URL·API',15);
+    for(const token of words(m[1]))ref(token,'API 경로 구성요소',6);
+  }
+  for(const m of text.matchAll(/<cl:listener\b[^>]*\bhandler\s*=\s*["']([^"']+)["']/gi)) {
+    ref(m[1],'화면 이벤트 핸들러',12);
+  }
+  for(const m of text.matchAll(/<cl:(?:dataset|datamap)\b[^>]*\bid\s*=\s*["']([^"']+)["']/gi)) {
+    def(m[1]);ref(m[1],'eXbuilder 데이터셋',8);
+  }
   const namespace=text.match(/<mapper\b[^>]*\bnamespace\s*=\s*["']([^"']+)["']/i)?.[1];
   if(namespace){def(namespace);ref(namespace.split('.').pop(),'매퍼 인터페이스',12);}
   for(const m of text.matchAll(/<(?:select|insert|update|delete|sql|resultMap)\b[^>]*\bid\s*=\s*["']([^"']+)["']/gi)) {
@@ -134,10 +144,16 @@ function rankedMatches(index,signals,omit=new Set()) {
 
 async function buildContext(request,index,signal,onProgress=()=>{}) {
   const warnings=[...index.warnings],trace=[],chosen=new Map(),expanded=new Set(),candidates=[];
-  let target='요청내용 기반 검색';try{target=requestPath(request.id);}catch(e){warnings.push(e.message+' 요청내용으로 하위 소스를 검색합니다.');}
-  const query=[...words(`${request.title||''}\n${request.text||''}\n${target}`)].map(term=>({term,kind:'요청내용 검색',weight:/\d|[./_]/.test(term)?12:5}));
-  const exact=index.files.map((f,id)=>({f,id})).filter(({f})=>f.indexed&&(normalized(f.relative)===normalized(target)||normalized(f.relative).endsWith('/'+normalized(target))));
-  const primary=exact.length?exact:index.files.map((f,id)=>({f,id})).filter(({f})=>f.indexed&&normalized(path.basename(f.relative))===normalized(path.basename(target)));
+  let target='요청내용 기반 검색', reqInfo=null;
+  try{
+    reqInfo=parseRequestId(request.id);
+    target=requestPath(request.id);
+  }catch(e){warnings.push(e.message+' 요청내용으로 하위 소스를 검색합니다.');}
+  const screenId=reqInfo?.screenId?.toLowerCase()||'';
+  const relBase=reqInfo?.relative?.toLowerCase()||'';
+  const query=[...words(`${request.title||''}\n${request.text||''}\n${target}\n${reqInfo?.screenId||''}`)].map(term=>({term,kind:'요청내용 검색',weight:/\d|[./_]/.test(term)?12:5}));
+  const exact=index.files.map((f,id)=>({f,id})).filter(({f})=>f.indexed&&(normalized(f.relative)===normalized(target)||normalized(f.relative).endsWith('/'+normalized(target))||(relBase&&(normalized(f.relative)===relBase+'.clx'||normalized(f.relative).endsWith('/'+relBase+'.clx')))));
+  const primary=exact.length?exact:index.files.map((f,id)=>({f,id})).filter(({f})=>f.indexed&&(normalized(path.basename(f.relative))===normalized(path.basename(target))||(screenId&&(normalized(path.basename(f.relative))===screenId+'.clx'||normalized(path.basename(f.relative))===screenId+'.xfdl'))));
   if(primary.length>1){warnings.push('기준 파일 후보가 여러 개여서 후보를 함께 분석합니다. 실제 배포 경로와 호출 관계를 확인해야 합니다.');candidates.push(...primary.map(({f})=>label(f)));}
   if(!exact.length&&primary.length)warnings.push('전체 경로가 일치하지 않아 파일명 후보를 포함했습니다.');
   if(!primary.length)warnings.push('요청ID 파일을 찾지 못해 하위 소스 내용의 일치 항목으로 분석을 시작합니다.');
@@ -148,6 +164,20 @@ async function buildContext(request,index,signal,onProgress=()=>{}) {
   }
   for(const {id} of primary.slice(0,8))select(id,'요청ID 경로·파일명 후보',0,[{term:normalized(path.basename(target))}]);
   if(primary.length>8)warnings.push(`기준 후보 ${primary.length}개 중 8개만 탐색을 시작합니다. 폴더 범위를 좁혀주세요.`);
+  if(screenId){
+    const screenRelated=index.files.map((f,id)=>({f,id})).filter(({f})=>{
+      if(!f.indexed)return false;
+      const ext=path.extname(f.relative).toLowerCase();
+      if(!['.clx','.js','.ts','.java','.sql','.xml'].includes(ext))return false;
+      const b=normalized(path.basename(f.relative)).replace(/\.[^.]+$/,'');
+      return b===screenId||b.startsWith(screenId+'_')||b.startsWith(screenId+'controller')||b.startsWith(screenId+'service')||b.startsWith(screenId+'mapper')||b.startsWith(screenId+'dao');
+    });
+    for(const {id,f} of screenRelated.slice(0,8)){
+      const ext=path.extname(f.relative).toLowerCase();
+      const reason=ext==='.clx'?'화면 정의 (.clx)':ext==='.js'||ext==='.ts'?'화면 스크립트 (.js)':ext==='.java'?'백엔드 (.java)':ext==='.sql'||ext==='.xml'?'매퍼·SQL (.xml/.sql)':'화면 관련 소스';
+      select(id,reason,0,[{term:screenId}]);
+    }
+  }
   const seeds=rankedMatches(index,query,new Set(chosen.keys()));
   for(const hit of seeds.slice(0,8))select(hit.id,`하위 파일 내용 일치: ${hit.hits.sort((a,b)=>b.score-a.score).slice(0,3).map(h=>h.term).join(', ')}`,0,hit.hits);
   let depth=0,omitted=0;
