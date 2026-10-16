@@ -23,4 +23,9 @@ function mergeRequests(previous,incoming){
   }
   return [...map.values()];
 }
-module.exports={Store,mergeRequests};
+// 2026-10-16 김기덕: 검증이 완료된 현재 PMS 목록을 기준으로 로컬 요청을 정리한다.
+function reconcileRequests(previous,incoming){
+  const ids=new Set(incoming.map(row=>row.id));
+  return mergeRequests(previous.filter(row=>ids.has(row.id)),incoming);
+}
+module.exports={Store,mergeRequests,reconcileRequests};

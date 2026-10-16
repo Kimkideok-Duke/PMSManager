@@ -25,4 +25,9 @@ class ProgressTracker {
     this.update({phase:status,message:message||(status==='완료'?'작업이 종료되었습니다. 요청별 결과를 확인하세요.':`작업 ${status}`),current:undefined,total:undefined});
   }
 }
-module.exports={ProgressTracker};
+// 2026-10-16 김기덕: 요청 실패·보류가 있는 배치를 전체 성공으로 표시하지 않는다.
+function completionFor(result){
+  const issues=(result?.failed||0)+(result?.blocked||0);
+  return issues?{status:'확인 필요',message:`작업 종료 · 분석 완료 ${result.done||0}건 · 실패/확인 필요 ${issues}건. 요청별 결과를 확인하세요.`}:{status:'완료'};
+}
+module.exports={ProgressTracker,completionFor};

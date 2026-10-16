@@ -18,7 +18,8 @@ function updateChatControls(){
   $('chat-input').disabled=!chatRow||!!chatRow.error;
   $('chat-send').disabled=!chatRow||!!chatRow.error||!!chatPending||!settings?.ai?.hasKey||!settings?.ai?.model||!$('chat-input').value.trim();
   $('chat-stop').hidden=!chatPending;$('chat-stop').disabled=false;
-  $('chat-status').textContent=chatPending?`${chatPending===chatRow?.id?'답변 대기':'다른 요청 답변 대기'} · ${Math.floor((Date.now()-chatStartedAt)/1000)}초`:chatErrors.get(chatRow?.id)||(!settings?.ai?.hasKey?'프로젝트 · AI 설정에서 API 키와 모델을 저장하세요.':'');
+  // 2026-10-16 김기덕: ChatGPT 로그인 사용자에게 API 키 등록을 요구하지 않는다.
+  $('chat-status').textContent=chatPending?`${chatPending===chatRow?.id?'답변 대기':'다른 요청 답변 대기'} · ${Math.floor((Date.now()-chatStartedAt)/1000)}초`:chatErrors.get(chatRow?.id)||(!settings?.ai?.hasKey?'프로젝트 · AI 설정에서 계정을 연결하고 모델을 선택하세요.':'');
 }
 async function sendChat(){
   if(!chatRow||chatPending)return;

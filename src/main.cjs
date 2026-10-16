@@ -1,29 +1,38 @@
-const {app,BrowserWindow,ipcMain,dialog,safeStorage,Menu}=require('electron');
+const {app,BrowserWindow,ipcMain,dialog,safeStorage,Menu,shell}=require('electron');
 const path=require('node:path');
 const fs=require('node:fs/promises');
 const {pathToFileURL}=require('node:url');
 const {randomUUID}=require('node:crypto');
-const {Store,mergeRequests}=require('./core/store.cjs');
+const {Store,mergeRequests,reconcileRequests}=require('./core/store.cjs');
 const {needsAnalysis,recordAnalysis,upgradeRow}=require('./core/content.cjs');
 const {runIncremental}=require('./core/incremental.cjs');
 const {indexProjects,buildContext}=require('./core/source.cjs');
 const ai=require('./core/ai.cjs');
+// 2026-10-16 김기덕: ChatGPT 플랜 로그인은 암호화된 별도 계정 저장소에서 관리한다.
+const {ChatGPTAuth}=require('./core/chatgpt-auth.cjs');
 const {Collector,PMS_URL}=require('./pms/collector.cjs');
-const {ProgressTracker}=require('./core/progress.cjs');
+const {ProgressTracker,completionFor}=require('./core/progress.cjs');
 const smoke=process.env.PMS_SMOKE_TEST==='1'&&!app.isPackaged;
 if(!app.isPackaged) app.setPath('userData',path.join(__dirname,'..',smoke?'.test-data/smoke-profile':'.local-data'));
-let window,pmsWindow,store,settings,requests=[],job=null,chatJob=null,prepared=null;
+let window,pmsWindow,store,settings,chatgpt,savedApiConnection,requests=[],job=null,chatJob=null,prepared=null;
+// 2026-10-16 김기덕: 동일 프로필의 다중 실행으로 갱신 토큰이 경쟁하는 것을 방지한다.
+const ownsProfile=!app.requestSingleInstanceLock||app.requestSingleInstanceLock();
+if(!ownsProfile)app.quit();
+app.on('second-instance',()=>{if(window&&!window.isDestroyed()){window.show();window.focus();}});
+app.on('before-quit',()=>chatgpt?.cancel());
 const contexts=new Map();
 const uiFile=path.join(__dirname,'ui','index.html');
 const uiURL=pathToFileURL(uiFile).href;
 const tracker=new ProgressTracker(value=>{if(window&&!window.isDestroyed())window.webContents.send('progress',value);});
 const progress=value=>tracker.update(value);
-const publicSettings=()=>({...settings,ai:{...settings.ai,key:undefined,encryptedKey:undefined,hasKey:!!settings.ai.encryptedKey}});
+const publicSettings=()=>({...settings,chatgpt:chatgpt?.publicState(),ai:{...settings.ai,key:undefined,encryptedKey:undefined,hasKey:settings.ai.provider==='chatgpt'?!!chatgpt?.publicState().connected:!!settings.ai.encryptedKey}});
 function getKey(){if(!settings.ai.encryptedKey)return '';if(!safeStorage.isEncryptionAvailable())throw new Error('Windows 암호화 저장소를 사용할 수 없습니다.');return safeStorage.decryptString(Buffer.from(settings.ai.encryptedKey,'base64'));}
-function idle(){if(job||chatJob)throw new Error('진행 중인 작업이 있습니다. 완료하거나 중지한 뒤 실행하세요.');}
+async function aiKey(config=settings.ai){return config.provider==='chatgpt'?chatgpt.credentials():getKey();}
+function idle(){if(job||chatJob||chatgpt?.pending||chatgpt?.refreshing)throw new Error('진행 중인 작업 또는 로그인이 있습니다. 완료하거나 중지한 뒤 실행하세요.');}
 function summaries(){return requests.map(({images,text,analysisHistory,chatMessages,analysis,...r})=>({...r,analysis:analysis?{createdAt:analysis.createdAt}:undefined,imageCount:images?.length||0,historyCount:analysisHistory?.length||0}));}
 function invalidate(){prepared=null;contexts.clear();}
-function handle(channel,fn){ipcMain.handle(channel,async(event,arg)=>{if(event.sender!==window.webContents||event.senderFrame!==window.webContents.mainFrame||event.senderFrame.url!==uiURL)throw new Error('허용되지 않은 호출');let tracked=false;try{if(['collect','sync','prepare','analyze'].includes(channel)){idle();tracker.begin({collect:'PMS 수집',sync:'자동 분석',prepare:'소스 검색',analyze:'AI 분석'}[channel]);tracked=true;}const value=await fn(arg);if(tracked)tracker.end('완료');return {ok:true,value};}catch(e){if(tracked)tracker.end(e.name==='AbortError'?'중지':'실패',e.message);return {ok:false,error:e.name==='AbortError'?'작업을 중지했습니다.':e.message};}});}
+// 2026-10-16 김기덕: 수집·분석 실패 건수를 반영해 종료 상태를 표시한다.
+function handle(channel,fn){ipcMain.handle(channel,async(event,arg)=>{if(event.sender!==window.webContents||event.senderFrame!==window.webContents.mainFrame||event.senderFrame.url!==uiURL)throw new Error('허용되지 않은 호출');let tracked=false;try{if(['collect','sync','prepare','analyze'].includes(channel)){idle();tracker.begin({collect:'PMS 수집',sync:'자동 분석',prepare:'소스 검색',analyze:'AI 분석'}[channel]);tracked=true;}const value=await fn(arg);if(tracked){const completion=completionFor(value);tracker.end(completion.status,completion.message);}return {ok:true,value};}catch(e){if(tracked)tracker.end(e.name==='AbortError'?'중지':'실패',e.message);return {ok:false,error:e.name==='AbortError'?'작업을 중지했습니다.':e.message};}});}
 async function saveRequests(){await store.write('requests',requests);}
 function browserOptions(){return {width:1500,height:980,minWidth:1000,minHeight:700,title:'PMS · 직접 로그인 후 조회',webPreferences:{nodeIntegration:false,contextIsolation:true,sandbox:true,partition:'pms-manual-session'}};}
 async function openPMS(){
@@ -53,10 +62,14 @@ function markdownFor(row){
 }
 
 app.whenReady().then(async()=>{
+  if(!ownsProfile)return;
   Menu.setApplicationMenu(null);store=new Store(app.getPath('userData'));
   try {
     settings=await store.read('settings',{projects:[],ai:{provider:'openai',endpoint:ai.BASES.openai,model:''}});
     requests=(await store.read('requests',[])).map(upgradeRow);
+    savedApiConnection=await store.read('api-connection',null);
+    chatgpt=new ChatGPTAuth({store,safeStorage,openExternal:url=>shell.openExternal(url)});
+    await chatgpt.load();
   }catch(e){dialog.showErrorBox('저장 데이터 확인 필요',e.message);app.quit();return;}
   window=new BrowserWindow({show:!smoke,width:1420,height:960,minWidth:1120,minHeight:750,title:'PMS Manager',backgroundColor:'#f4f6fa',webPreferences:{preload:path.join(__dirname,'preload.cjs'),nodeIntegration:false,contextIsolation:true,sandbox:true}});
   window.webContents.setWindowOpenHandler(()=>({action:'deny'}));
@@ -65,6 +78,22 @@ app.whenReady().then(async()=>{
   window.on('closed',()=>app.quit());
   handle('state',()=>({settings:publicSettings(),requests:summaries(),dataPath:app.getPath('userData'),progress:tracker.snapshot()}));
   handle('open-pms',()=>openPMS());
+  // 2026-10-16 김기덕: 인증은 시스템 브라우저에서 사용자가 직접 진행하고 토큰은 화면에 전달하지 않는다.
+  handle('chatgpt-login',async id=>{
+    idle();const {completion}=await chatgpt.start(id);
+    completion.then(async result=>{
+      const previous=settings.ai;
+      if(previous.provider!=='chatgpt'){await store.write('api-connection',previous);savedApiConnection=previous;}
+      settings.ai={provider:'chatgpt',endpoint:ai.BASES.chatgpt,model:previous.provider==='chatgpt'?previous.model:''};
+      try{await store.write('settings',settings);}catch{settings.ai=previous;throw Error('AI 연결 방식 저장에 실패했습니다. 설정에서 ChatGPT 연결을 다시 선택하세요.');}
+      invalidate();if(!window.isDestroyed())window.webContents.send('chatgpt-state',{settings:publicSettings(),...result});
+    }).catch(error=>{if(!window.isDestroyed())window.webContents.send('chatgpt-state',{settings:publicSettings(),error:error.message});});
+    return publicSettings();
+  });
+  handle('chatgpt-cancel',()=>{chatgpt.cancel();return publicSettings();});
+  handle('chatgpt-select',async id=>{idle();await chatgpt.select(id);invalidate();if(settings.ai.provider==='chatgpt'){settings.ai.model='';await store.write('settings',settings);}return publicSettings();});
+  handle('chatgpt-logout',async()=>{idle();const result=await chatgpt.signOut();invalidate();return {settings:publicSettings(),...result};});
+  handle('chatgpt-usage',()=>shell.openExternal('https://chatgpt.com/settings/usage'));
   handle('project-add',async()=>{
     idle();const result=await dialog.showOpenDialog(window,{title:'분석할 프로젝트 소스 폴더 선택',properties:['openDirectory']});
     if(result.canceled)return publicSettings();
@@ -78,19 +107,34 @@ app.whenReady().then(async()=>{
   handle('ai-save',async input=>{
     idle();const next={provider:input.provider,endpoint:input.endpoint,model:String(input.model||'').trim()};
     next.endpoint=ai.endpoint(next);
-    if(input.key?.trim()){
+    // 2026-10-16 김기덕: 플랜 로그인과 전환해도 기존 API 키는 별도 암호화 설정에 보존한다.
+    if(next.provider==='chatgpt'&&settings.ai.provider!=='chatgpt'){await store.write('api-connection',settings.ai);savedApiConnection=settings.ai;}
+    if(next.provider!=='chatgpt'&&input.key?.trim()){
       if(!safeStorage.isEncryptionAvailable())throw new Error('Windows 암호화 저장소를 사용할 수 없어 키를 저장하지 않았습니다.');
       next.encryptedKey=safeStorage.encryptString(input.key.trim()).toString('base64');
     }else if(next.provider===settings.ai.provider&&next.endpoint===ai.endpoint(settings.ai))next.encryptedKey=settings.ai.encryptedKey;
+    else if(next.provider!=='chatgpt'&&savedApiConnection?.provider===next.provider&&savedApiConnection.endpoint===next.endpoint)next.encryptedKey=savedApiConnection.encryptedKey;
     settings.ai=next;invalidate();await store.write('settings',settings);return publicSettings();
   });
-  handle('ai-clear-key',async()=>{idle();delete settings.ai.encryptedKey;invalidate();await store.write('settings',settings);return publicSettings();});
-  handle('models',()=>{idle();return ai.listModels(settings.ai,getKey());});
+  handle('ai-clear-key',async()=>{
+    idle();
+    // 2026-10-16 김기덕: 키 제거 후 연결 방식 전환으로 보관 키가 복원되지 않도록 함께 제거한다.
+    if(savedApiConnection?.provider===settings.ai.provider&&savedApiConnection.endpoint===settings.ai.endpoint){delete savedApiConnection.encryptedKey;await store.write('api-connection',savedApiConnection);}
+    delete settings.ai.encryptedKey;invalidate();await store.write('settings',settings);return publicSettings();
+  });
+  handle('models',async()=>{
+    idle();const config={...settings.ai},accountId=chatgpt.publicState().activeId;
+    const result=await ai.listModels(config,await aiKey(config));
+    // 2026-10-16 김기덕: 조회 대기 중 계정이나 제공업체가 바뀌면 이전 모델 목록을 표시하지 않는다.
+    if(config.provider!==settings.ai.provider||config.endpoint!==settings.ai.endpoint||config.provider==='chatgpt'&&accountId!==chatgpt.publicState().activeId)throw Error('AI 계정이 변경됐습니다. 모델 목록을 다시 조회하세요.');
+    return result;
+  });
   handle('collect',async({ready})=>{
     idle();if(!ready)throw new Error('PMS 로그인과 조건 입력·조회 완료를 체크하세요.');
     if(!pmsWindow||pmsWindow.isDestroyed())throw new Error('PMS 열기 버튼으로 창을 열고 로그인하세요.');
     job=new AbortController();invalidate();
-    try{const incoming=await new Collector(pmsWindow.webContents,progress).collect(job.signal);requests=mergeRequests(requests,incoming);await saveRequests();return {requests:summaries(),ids:incoming.filter(r=>!r.error).map(r=>r.id),collected:incoming.length,failed:incoming.filter(r=>r.error).length};}
+    // 2026-10-16 김기덕: 수집 전용 경로에서도 현재 PMS 목록과 동기화한다.
+    try{const incoming=await new Collector(pmsWindow.webContents,progress).collect(job.signal);requests=reconcileRequests(requests,incoming);await saveRequests();return {requests:summaries(),ids:incoming.filter(r=>!r.error).map(r=>r.id),collected:incoming.length,failed:incoming.filter(r=>r.error).length};}
     finally{job=null;progress({phase:'대기',message:'수집 작업 종료'});}
   });
   handle('sync',async({ready})=>{
@@ -100,12 +144,13 @@ app.whenReady().then(async()=>{
     try{
       const result=await runIncremental({previous:requests,signal:job.signal,progress,
         collect:(signal,onItem)=>new Collector(pmsWindow.webContents,progress).collect(signal,onItem),
-        createIndex:signal=>{
-          if(!getKey()||!settings.ai.model)throw new Error('요청내용은 저장했습니다. AI API 키와 모델을 설정한 뒤 다시 실행하세요.');
-          return indexProjects(settings.projects.filter(p=>p.enabled),signal,progress);
+        createIndex:async signal=>{
+          if(!settings.ai.model||!await aiKey())throw new Error('요청내용은 저장했습니다. AI 계정 연결과 모델을 설정한 뒤 다시 실행하세요.');
+          // 2026-10-16 김기덕: 전체 내용 색인 대신 업무 폴더와 참조 파일만 지연 색인한다.
+          return indexProjects(settings.projects.filter(p=>p.enabled),signal,progress,{scoped:true});
         },
         buildContext:(row,index,signal)=>buildContext(row,index,signal,progress),
-        analyze:(row,context,signal)=>ai.analyze(settings.ai,getKey(),row,context,signal),
+        analyze:async(row,context,signal)=>ai.analyze(settings.ai,await aiKey(),row,context,signal),
         onContext:(id,context)=>contexts.set(id,context),
         save:async rows=>{requests=rows;await saveRequests();}
       });
@@ -122,7 +167,7 @@ app.whenReady().then(async()=>{
     try{
       progress({phase:'소스 연결',message:'등록된 프로젝트 폴더를 읽고 있습니다.'});
       progress({phase:'소스 연결',items:rows.map(r=>({id:r.id,title:r.title,status:'검색 대기'})),activeId:null,batchCurrent:0,batchTotal:rows.length,message:'선택 요청의 소스를 준비합니다.'});
-      const index=await indexProjects(settings.projects.filter(p=>p.enabled),job.signal,progress);
+      const index=await indexProjects(settings.projects.filter(p=>p.enabled),job.signal,progress,{scoped:true});
       for(const [n,row] of rows.entries()){
         progress({phase:'소스 연결',requestId:row.id,title:row.title,status:'소스 검색 중',message:row.id,batchCurrent:n,batchTotal:rows.length});
         const context=await buildContext(row,index,job.signal,progress);contexts.set(row.id,context);
@@ -135,7 +180,7 @@ app.whenReady().then(async()=>{
   });
   handle('analyze',async({token})=>{
     idle();if(!prepared||token!==prepared.token||prepared.config!==JSON.stringify(settings.ai))throw new Error('분석 자료가 변경되었습니다. 소스 연결을 다시 실행하세요.');
-    const key=getKey();if(!key)throw new Error('AI API 키를 먼저 등록하세요.');
+    const key=await aiKey();if(!key)throw new Error('AI 계정을 먼저 연결하세요.');
     if(!settings.ai.model)throw new Error('AI 모델을 선택하세요.');
     const batch=prepared;prepared=null;job=new AbortController();let failed=0,done=0;
     progress({phase:'AI 분석',items:batch.ids.map(id=>({id,title:requests.find(r=>r.id===id)?.title,status:'분석 대기'})),batchCurrent:0,batchTotal:batch.ids.length,message:'선택 요청 분석 시작'});
@@ -146,7 +191,7 @@ app.whenReady().then(async()=>{
         if(context.blocked){failed++;progress({phase:'AI 분석',requestId:id,status:'관련 소스 확인 필요',message:`${id} · 소스 누락으로 보류`,batchCurrent:n+1,batchTotal:batch.ids.length});continue;}
         progress({phase:'AI 응답 대기',requestId:id,status:'AI 응답 대기',message:`${id} · ${settings.ai.model} 응답 대기`,batchCurrent:n,batchTotal:batch.ids.length});
         try{
-          const result=await ai.analyze(settings.ai,key,row,context,job.signal);
+          const result=await ai.analyze(settings.ai,await aiKey(),row,context,job.signal);
           recordAnalysis(row,result);done++;
         }catch(e){if(job.signal.aborted)throw e;row.analysisError=e.message;failed++;}
         await saveRequests();progress({phase:'결과 저장',requestId:id,status:row.analysisError?'분석 실패':'분석 완료',message:`${id} · ${row.analysisError||'분석 완료'}`,batchCurrent:n+1,batchTotal:batch.ids.length});
@@ -161,14 +206,17 @@ app.whenReady().then(async()=>{
     const row=requests.find(r=>r.id===id);
     if(!row||row.error)throw new Error('상세 내용을 수집한 요청을 선택하세요.');
     if(typeof message!=='string'||!message.trim()||message.length>10000)throw new Error('메시지는 1~10,000자로 입력하세요.');
-    const config={...settings.ai},key=getKey();
-    if(!key||!config.model)throw new Error('AI API 키와 모델을 먼저 설정하세요.');
+    const config={...settings.ai};
+    if(!config.model)throw new Error('AI 모델을 먼저 설정하세요.');
     const snapshot=structuredClone(row);
     const context=structuredClone(contexts.get(id)||row.analysis?.context||{target:'소스 미연결',files:[],warnings:['소스 발췌가 없습니다. 소스 검색 후 대화하면 근거를 보완할 수 있습니다.'],hash:null});
     const user={role:'user',content:message.trim(),createdAt:new Date().toISOString(),contentFingerprint:row.contentFingerprint};
     const history=(snapshot.chatMessages||[]).slice(-20);
     chatJob=new AbortController();
     try{
+      const key=await aiKey(config);if(!key)throw new Error('AI 계정을 먼저 연결하세요.');
+      // 2026-10-16 김기덕: 인증 갱신 대기 중 중지된 대화를 외부로 전송하지 않는다.
+      chatJob.signal.throwIfAborted();
       const reply=await ai.chat(config,key,snapshot,context,[...history,user],chatJob.signal);
       chatJob.signal.throwIfAborted();
       const current=requests.find(r=>r.id===id);

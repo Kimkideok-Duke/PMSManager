@@ -11,7 +11,8 @@ async function harness(chat){
   const directory=path.join(__dirname,'../src'),handlers=new Map(),windows=[];let startup;
   const row={id:'REQ-a.xfdl1',text:'요청',images:[],chatMessages:[],analysis:{report:{summary:'기존 분석'},context:{target:'a.xfdl',files:[{content:'1: save();'}],warnings:[],hash:'saved'}}};row.contentFingerprint=contentFingerprint(row);
   const data={requests:[row],settings:{projects:[],ai:{provider:'openai',model:'fake',encryptedKey:Buffer.from('fake-key').toString('base64')}}};
-  class Store{async read(name){return structuredClone(data[name]);}async write(name,value){data[name]=structuredClone(value);}}
+  // 2026-10-16 김기덕: ChatGPT 인증 저장소의 기본값도 실제 Store와 같이 제공한다.
+  class Store{async read(name,fallback){return structuredClone(data[name]===undefined?fallback:data[name]);}async write(name,value){data[name]=structuredClone(value);}}
   class Window{constructor(){this.webContents={mainFrame:{url:pathToFileURL(path.join(directory,'ui/index.html')).href},setWindowOpenHandler(){},on(){},send(){}};windows.push(this);}on(){}async loadFile(){}isDestroyed(){return false;}}
   const electron={app:{isPackaged:true,getPath:()=>'',whenReady:()=>({then(fn){startup=Promise.resolve().then(fn);return startup;}}),on(){},quit(){}},BrowserWindow:Window,ipcMain:{handle:(name,fn)=>handlers.set(name,fn)},dialog:{showErrorBox:(_title,message)=>{throw Error(message);}},safeStorage:{isEncryptionAvailable:()=>true,decryptString:b=>b.toString()},Menu:{setApplicationMenu(){}}};
   const realRequire=createRequire(path.join(directory,'main.cjs'));

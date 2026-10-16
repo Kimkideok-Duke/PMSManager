@@ -5,6 +5,22 @@ const path=require('node:path');
 const {JSDOM}=require('jsdom');
 const uiScript=async()=> (await Promise.all(['activity.js','chat.js','app.js'].map(name=>fs.readFile(path.join(__dirname,'../src/ui',name),'utf8')))).join('\n');
 const tick=()=>new Promise(r=>setTimeout(r,25));
+
+// 2026-10-16 김기덕: 플랜 연결의 계정 선택·로그인 취소·모델 표시명과 안내를 검증한다.
+test('ChatGPT 연결은 API 키 입력을 숨기고 로그인 결과와 계정별 모델을 표시한다',async()=>{
+ const dom=new JSDOM(await fs.readFile(path.join(__dirname,'../src/ui/index.html'),'utf8'),{runScripts:'outside-only'}),w=dom.window,d=w.document;let connected,received;
+ let settings={projects:[],ai:{provider:'openai',endpoint:'https://api.openai.com/v1',model:'',hasKey:false},chatgpt:{accounts:[],activeId:null,connected:false}};
+ w.pms={state:async()=>({settings,requests:[]}),onProgress:()=>{},onConnection:fn=>connected=fn,
+  'chatgpt-login':async id=>{received=id;settings={...settings,chatgpt:{...settings.chatgpt,pending:true}};return settings;},
+  'chatgpt-cancel':async()=>{settings={...settings,chatgpt:{...settings.chatgpt,pending:false}};return settings;},models:async()=>[{id:'model-1',name:'표시할 모델'}]};
+ try{w.eval(await uiScript());await tick();d.getElementById('provider').value='chatgpt';d.getElementById('provider').dispatchEvent(new w.Event('change'));
+  assert.equal(d.getElementById('api-fields').hidden,true);d.getElementById('chatgpt-login').click();await tick();assert.equal(received,null);assert.equal(d.getElementById('chatgpt-cancel').hidden,false);
+  d.getElementById('chatgpt-cancel').click();await tick();assert.equal(d.getElementById('chatgpt-cancel').hidden,true);
+  settings={projects:[],ai:{provider:'chatgpt',endpoint:'https://api.openai.com/v1',model:'',hasKey:true},chatgpt:{accounts:[{id:'one',label:'계정 1',email:'test@example.invalid',connected:true}],activeId:'one',connected:true}};
+  connected({settings,planEnabled:true});await tick();assert.match(d.getElementById('chatgpt-state').textContent,/연결됨/);assert.match(d.getElementById('chatgpt-account').textContent,/계정 1/);
+  d.getElementById('load-models').click();await tick();assert.equal(d.querySelector('#models option').value,'model-1');assert.equal(d.querySelector('#models option').textContent,'표시할 모델');assert.equal(d.getElementById('clear-key').hidden,true);
+ }finally{w.close();}
+});
 test('대화 요청을 전환해도 초안과 응답이 섞이지 않고 실패 후 다시 전송할 수 있다',async()=>{
   const dom=new JSDOM(await fs.readFile(path.join(__dirname,'../src/ui/index.html'),'utf8'),{runScripts:'outside-only'}),w=dom.window;
   const rows=[{id:'REQ-a.xfdl1',text:'A',images:[]},{id:'REQ-b.xfdl1',text:'B',images:[]}];let finish,fail=true;
@@ -46,4 +62,11 @@ test('자동 분석 버튼이 수집·비교·분석 IPC를 호출하고 생략 
  const settings={projects:[],ai:{provider:'openai',endpoint:'https://api.openai.com/v1',model:'example',hasKey:true}};
  w.pms={state:async()=>({settings,requests:[],dataPath:'local'}),onProgress:()=>{},sync:async input=>{received=input;return {requests:[],ids:[],collected:3,unchanged:2,done:1,failed:0,blocked:0};}};
  try{w.eval(script);await new Promise(r=>setTimeout(r,20));w.document.getElementById('ready').checked=true;w.document.getElementById('collect').click();await new Promise(r=>setTimeout(r,20));assert.equal(received.ready,true);assert.match(w.document.getElementById('toast').textContent,/동일 내용 생략 2건.*분석 완료 1건/);assert.equal(w.document.getElementById('collect').disabled,false);}finally{w.close();}
+});
+// 2026-10-16 김기덕: 목록 동기화로 삭제된 요청의 상세·대화 선택을 해제한다.
+test('선택된 요청이 PMS 목록에서 사라지면 상세와 대화 대상을 해제한다',async()=>{
+ const dom=new JSDOM(await fs.readFile(path.join(__dirname,'../src/ui/index.html'),'utf8'),{runScripts:'outside-only'}),w=dom.window;
+ const id='REQ-ec/Closed.xfdl1',row={id,title:'완료 요청',text:'이전 본문',images:[],chatMessages:[]};let rows=[row];
+ w.pms={state:async()=>({settings:{projects:[],ai:{provider:'openai'}},requests:rows,dataPath:'local'}),detail:async()=>row,onProgress:()=>{}};
+ try{w.eval(await uiScript());await tick();w.document.querySelector('.request-row').click();await tick();rows=[];await w.eval('refresh()');assert.match(w.document.getElementById('detail').textContent,/현재 PMS 목록에서 제외/);assert.equal(w.document.getElementById('chat-input').disabled,true);assert.equal(w.document.querySelector('.request-row'),null);}finally{w.close();}
 });

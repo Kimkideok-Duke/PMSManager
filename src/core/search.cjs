@@ -3,7 +3,8 @@ const path = require('node:path');
 const {parseRequestId,requestPath,readSource,redact,digest,slash,excerpts} = require('./files.cjs');
 
 const EXTENSIONS = new Set(('.clx .xfdl .xjs .js .mjs .cjs .ts .tsx .jsx .java .kt .kts .xml .sql .ddl .jsp .jspx .properties .vue .svelte .html .htm .css .scss .less .cs .cshtml .vb .py .go .rs .c .h .cpp .hpp .php .rb .json .yaml .yml .toml .ini .config .conf .txt .md .gradle .prisma .graphql .gql').split(' '));
-const EXCLUDED = new Set(['.git','.svn','node_modules','target','build','dist','.idea','.metadata','.gradle','coverage','bin','obj','.next','.nuxt','.venv','venv','__pycache__']);
+// 2026-10-16 김기덕: icms 원본과 중복되는 eXbuilder 생성물·배포본·작업 폴더의 재색인을 방지한다.
+const EXCLUDED = new Set(['.git','.svn','node_modules','target','build','dist','clx-build','webapps','outputs','work','jsdocs','.idea','.metadata','.gradle','coverage','bin','obj','.next','.nuxt','.venv','venv','__pycache__']);
 const STOP = new Set(('this form self public private protected static final return class interface extends implements new function const let var if else null true false undefined string number boolean object void int long double float import from package export default include select update insert delete into where join table values set get save load open close error message data value name type text id row col div span input button script style xmlns http https www com org java util system console log promise async await function onload onclick transaction addrow application encoding version utf-8 json xml xfdl java sql js ts').split(' '));
 const LIMITS = {files:75000,postings:3000000,termsPerFile:30000,contextFiles:40,contextChars:240000,depth:5};
 const normalized = value => value.replaceAll('\\','/').replaceAll('::','/').replace(/^\/+|\/+$/g,'').toLowerCase();
@@ -69,10 +70,10 @@ function symbols(text) {
   return {definitions,references:[...references.values()]};
 }
 
-async function indexProjects(projects,signal,onProgress=()=>{}) {
-  if(!projects.length)throw new Error('프로젝트 최상위 폴더를 먼저 등록하세요.');
-  const files=[],warnings=[],excluded=[],postings=new Map(),seen=new Set();
-  const stats={roots:[],visitedFiles:0,indexedFiles:0,skippedFiles:0,excludedDirectories:0,bytesRead:0};
+async function indexProjects(projects,signal,onProgress=()=>{},options={}) {
+  if(!projects.length&&!options.catalog)throw new Error('프로젝트 최상위 폴더를 먼저 등록하세요.');
+  const files=options.catalog?options.catalog.map(f=>({...f})):[],warnings=[],excluded=[],postings=new Map(),seen=new Set();
+  const stats={roots:options.roots||[],visitedFiles:options.catalog?.length||0,indexedFiles:0,skippedFiles:0,excludedDirectories:0,bytesRead:0};
   const note=(relative,reason)=>{stats.skippedFiles++;if(excluded.length<300)excluded.push({path:relative,reason});};
   for(const project of projects) {
     signal?.throwIfAborted();
@@ -104,6 +105,8 @@ async function indexProjects(projects,signal,onProgress=()=>{}) {
     }
     await walk(root);
   }
+  // 2026-10-16 김기덕: 전체 트리는 경로만 수집하고 내용 읽기는 요청별 업무 폴더로 지연한다.
+  if(options.scoped)return {files,warnings,excluded,stats,scoped:true,scopeCache:new Map()};
   let postingCount=0;
   for(const [i,file] of files.entries()) {
     signal?.throwIfAborted();
@@ -143,6 +146,8 @@ function rankedMatches(index,signals,omit=new Set()) {
 }
 
 async function buildContext(request,index,signal,onProgress=()=>{}) {
+  // 2026-10-16 김기덕: 화면 코드에 해당하는 업무 폴더와 명시적 참조만 색인한다.
+  if(index.scoped)return buildScopedContext(request,index,signal,onProgress);
   const warnings=[...index.warnings],trace=[],chosen=new Map(),expanded=new Set(),candidates=[];
   let target='요청내용 기반 검색', reqInfo=null;
   try{
@@ -224,4 +229,59 @@ async function buildContext(request,index,signal,onProgress=()=>{}) {
   if(!files.length)warnings.push('요청과 연결되는 소스 내용을 찾지 못했습니다. 프로젝트 폴더와 요청 설명을 확인하세요.');
   return {target,files,warnings,candidates,search,blocked:!files.length,hash:digest(JSON.stringify(['recursive-content-v2',files.map(f=>[f.absolute,f.hash,f.content])]))};
 }
-module.exports={indexProjects,buildContext,words,symbols,LIMITS};
+// 2026-10-16 김기덕: ECC0101 → EC/ECC 경로를 계산하고 검색 범위 확대 이유를 기록한다.
+function scopeFor(request){
+  let target='';try{target=normalized(requestPath(request.id));}catch{}
+  const code=path.posix.basename(target).match(/^([a-z]{2,})\d/i)?.[1]||'';
+  const folder=target.split('/').slice(0,-1).join('/')||(code?`${code.slice(0,2)}/${code}`:'');
+  return {target,code,business:code.slice(0,2),folder};
+}
+async function buildScopedContext(request,catalog,signal,onProgress){
+  const scope=scopeFor(request),selected=new Map(),stages=[];
+  const add=file=>selected.set(file.absolute,file);
+  const inFolder=(file,folder)=>!!folder&&`/${normalized(slash(path.join(file.root,file.relative)))}/`.includes(`/${folder}/`);
+  for(const file of catalog.files)if(inFolder(file,scope.folder)||scope.code&&inFolder(file,`${scope.business}/${scope.code}`))add(file);
+  stages.push({stage:'업무 폴더',scope:scope.folder||scope.code||'경로 미확인',files:selected.size});
+  const names=words(`${scope.target}\n${request.text||''}`);
+  for(const file of catalog.files){const base=normalized(path.basename(file.relative));if(names.has(base)||names.has(base.replace(/\.[^.]+$/,'')))add(file);}
+  if(!selected.size&&scope.business){
+    for(const file of catalog.files)if(inFolder(file,scope.business))add(file);
+    stages.push({stage:'상위 업무 폴더로 확대',scope:scope.business,files:selected.size});
+  }
+  if(!selected.size){
+    for(const file of catalog.files)add(file);
+    stages.push({stage:'업무 경로 미발견으로 전체 범위 사용',scope:'등록 폴더',files:selected.size});
+  }
+  let subset;
+  for(let depth=0;depth<=LIMITS.depth;depth++){
+    signal?.throwIfAborted();
+    const key=[...selected.keys()].sort().join('\n');
+    subset=catalog.scopeCache.get(key);
+    if(!subset){
+      onProgress({phase:'업무 소스 색인',message:`${scope.folder||scope.code||'후보 경로'} · 내용 확인 ${selected.size}개 / 전체 경로 ${catalog.files.length}개`});
+      subset=await indexProjects([],signal,onProgress,{catalog:[...selected.values()],roots:catalog.stats.roots});
+      catalog.scopeCache.set(key,subset);
+    }
+    if(depth===LIMITS.depth)break;
+    // 2026-10-16 김기덕: 업무 폴더 전체의 참조가 아니라 요청 관련 파일에서만 범위를 확장한다.
+    const currentContext=await buildContext(request,subset,signal,onProgress);
+    const related=new Set(currentContext.files.map(file=>file.absolute));
+    const references=new Set(subset.files.filter(file=>related.has(file.absolute)).flatMap(file=>(file.references||[]).filter(r=>r.weight>=10).map(r=>r.term)));
+    const referenceNames=new Set([...references].map(ref=>path.posix.basename(ref)));
+    const before=selected.size;
+    for(const file of catalog.files){
+      const base=normalized(path.basename(file.relative)),stem=base.replace(/\.[^.]+$/,'');
+      if(referenceNames.has(base)||referenceNames.has(stem)||references.has(normalized(file.relative)))add(file);
+    }
+    if(selected.size===before)break;
+    stages.push({stage:'명시적 파일·클래스 참조 추가',scope:`${depth+1}단계`,files:selected.size});
+  }
+  const result=await buildContext(request,subset,signal,onProgress);
+  result.search.catalogFiles=catalog.files.length;
+  result.search.scope={folder:scope.folder,code:scope.code,stages};
+  result.warnings.push(...catalog.warnings);
+  result.warnings.push('업무 범위와 명시적 파일·클래스 참조만 검색했습니다. 범위 밖의 동적 API·함수·SQL 연결은 추가 확인이 필요합니다.');
+  if(stages.some(s=>s.stage.includes('전체 범위')))result.warnings.push('요청 업무 폴더를 찾지 못해 전체 소스 내용 검색으로 확대했습니다.');
+  return result;
+}
+module.exports={indexProjects,buildContext,words,symbols,LIMITS,scopeFor};

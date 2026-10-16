@@ -1,6 +1,12 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {ProgressTracker}=require('../src/core/progress.cjs');
+const {ProgressTracker,completionFor}=require('../src/core/progress.cjs');
+// 2026-10-16 김기덕: 2건 모두 상세 읽기 실패인데 완료로 보이는 실제 오류를 재현한다.
+test('실패·확인 필요가 남아 있으면 전체 완료로 표시하지 않는다',()=>{
+ assert.equal(completionFor({done:0,blocked:2,failed:0}).status,'확인 필요');
+ assert.equal(completionFor({done:1,failed:1}).status,'확인 필요');
+ assert.equal(completionFor({done:2,failed:0,blocked:0}).status,'완료');
+});
 const {runIncremental}=require('../src/core/incremental.cjs');
 test('실제 처리 결과를 요청별로 기록하며 단계 변경 시 이전 진행률을 지운다',async()=>{
   const tracker=new ProgressTracker();tracker.begin('자동 분석');

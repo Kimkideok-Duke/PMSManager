@@ -3,6 +3,18 @@ const assert=require('node:assert/strict');
 const {runIncremental}=require('../src/core/incremental.cjs');
 const {contentFingerprint,needsAnalysis,recordAnalysis,upgradeRow}=require('../src/core/content.cjs');
 const row=(text='오류',id='REQ-ec/Main.xfdl1')=>({id,text,images:[],warnings:[]});
+// 2026-10-16 김기덕: 현재 PMS 목록 동기화와 실패 시 삭제 방지를 검증한다.
+test('정상 전체 조회 후 사라진 요청은 제거하고 현재 요청의 분석·메모는 보존한다',async()=>{
+ const first=await batch([],[row(),row('조치됨','REQ-ec/Closed.xfdl1')]);first.rows[0].note='검토 메모';
+ const next=await batch(first.rows,[row()]);
+ assert.equal(next.removed,1);assert.equal(next.rows.length,1);assert.equal(next.rows[0].note,'검토 메모');assert.ok(next.rows[0].analysis);assert.equal(next.unchanged,1);
+ const empty=await batch(next.rows,[]);assert.equal(empty.rows.length,0);assert.equal(empty.removed,1);
+});
+test('목록 수집 실패에서는 과거 요청을 삭제하지 않는다',async()=>{
+ const previous=[row('보존')];let saved;
+ await assert.rejects(()=>batch(previous,[],{collect:async()=>{throw Error('부분 목록');},save:async rows=>{saved=rows;}}),/부분 목록/);
+ assert.equal(saved,undefined);assert.equal(previous.length,1);
+});
 async function batch(previous,incoming,extra={}){
  const calls={read:0,index:0,ai:[],saved:[]};
  const result=await runIncremental({previous,collect:async()=>{calls.read++;return incoming;},createIndex:async()=>{calls.index++;return {};},buildContext:async()=>({blocked:false}),analyze:async r=>{calls.ai.push(r.id);return {report:{summary:r.text}};},save:async rows=>calls.saved.push(JSON.parse(JSON.stringify(rows))),...extra});
@@ -29,6 +41,19 @@ test('API 실패·소스 누락·이미지 실패는 분석 완료로 기록하�
  result=await batch(result.rows,[{...row(),contentComplete:false,warnings:['이미지 읽기 실패']}]);assert.equal(result.blocked,1);assert.equal(result.calls.index,0);
  result=await batch(result.rows,[row()]);assert.equal(result.done,1);
  const failedRead=await batch(result.rows,[{id:row().id,error:'상세 실패'}]);assert.equal(failedRead.unchanged,0);assert.equal(failedRead.blocked,1);
+});
+// 2026-10-16 김기덕: 실제 API 429 테스트에서 발견한 종료 후 실패 상태 덮어쓰기를 방지한다.
+test('전체 수집 종료 후에도 API 실패와 관련 소스 확인 상태를 보존하고 실패 건수를 알린다',async()=>{
+ const events=[];
+ const result=await batch([],[row(),row('다른 요청','REQ-ec/Other.xfdl1')],{
+  buildContext:async r=>r.id===row().id?{blocked:false}:{blocked:true,warnings:['소스 확인 필요']},
+  analyze:async()=>{throw Error('AI API HTTP 429');},progress:event=>events.push(event)
+ });
+ assert.equal(result.rows[0].syncStatus,'분석 실패');
+ assert.equal(result.rows[0].analysisError,'AI API HTTP 429');
+ assert.equal(result.rows[1].syncStatus,'관련 소스 확인 필요');
+ assert.match(events.at(-1).message,/실패 1건 · 확인 필요 1건/);
+ assert.deepEqual(result.calls.saved.at(-1),JSON.parse(JSON.stringify(result.rows)));
 });
 test('구버전의 정확히 대응하는 성공 결과만 이전하고 근거 없는 결과는 다시 분석한다',()=>{
  const legacy={...row(),fingerprint:'old',analysis:{requestFingerprint:'old',report:{}}};assert.equal(needsAnalysis(legacy),false);

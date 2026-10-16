@@ -2,11 +2,17 @@
 function pageAction(action, arg) {
   const visible = e => !!e && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
   const grids = [...document.querySelectorAll('[role="grid"]')].filter(visible);
+  // 2026-10-16 김기덕: 가로 가상화로 메뉴명 열이 사라져도 오른쪽 요청ID 헤더로 동일 그리드를 찾는다.
   const grid = grids.find(e => [...e.querySelectorAll('[role="row"]')].some(r => {
     const text = r.innerText || r.textContent || '';
-    return text.includes('메뉴명') && (text.includes('요청ID') || (text.includes('등록일자') && text.includes('처리상태')));
+    const hasDatesAndStatus=text.includes('등록일자')&&text.includes('처리상태');
+    return text.includes('메뉴명')&&(text.includes('요청ID')||hasDatesAndStatus)
+      ||text.includes('요청ID')&&hasDatesAndStatus;
   }));
   if (!grid) return {error:'바로콘변경요청관리에서 로그인·조건 입력·조회를 완료하세요. 요청내역 그리드를 찾지 못했습니다.'};
+  // 2026-10-16 김기덕: 건수 속성 누락을 빈 조회로 오인해 로컬 목록을 삭제하지 않는다.
+  const rawCount=grid.getAttribute('aria-rowcount'),rowCount=Number(rawCount);
+  if(rawCount===null||!Number.isInteger(rowCount)||rowCount<1)return {error:'PMS 요청 전체 건수를 확인할 수 없습니다. 목록을 유지했습니다. 다시 조회하세요.'};
 
   const allRows = [...grid.querySelectorAll('[role="row"][data-rowindex]')];
   const cellText = c => (c.querySelector?.('input')?.value || c.innerText || c.textContent || c.getAttribute?.('aria-label')?.replace(/^\d+행\s+\d+열\s*/, '') || '').trim();
@@ -51,6 +57,7 @@ function pageAction(action, arg) {
   const horizontal = [...grid.querySelectorAll('[data-role="scroll-container"],div')].filter(e=>e.scrollWidth>e.clientWidth+2 && e.clientWidth>100 && (/auto|scroll/.test(getComputedStyle(e).overflowX) || (e.matches('[data-role="scroll-container"]') && e.closest('.cl-grid-detail')))).sort((a,b)=>b.scrollWidth-a.scrollWidth)[0];
 
   function getEditors() {
+    // 2026-10-16 김기덕: 일반 iframe을 요청내용으로 오인하지 않도록 편집기 식별을 필수화한다.
     const candidates = [];
     function visit(doc, depth, hostFrame) {
       if (!doc || depth > 6) return;
@@ -63,7 +70,7 @@ function pageAction(action, arg) {
         if (/\bse2_iframe\b/i.test(frameName)) score += 90;
         if (body?.isContentEditable || String(doc.designMode).toLowerCase() === 'on') score += 40;
         if (/smart editor|wysiwyg|editor/i.test(`${doc.title||''} ${frameName}`)) score += 20;
-        if (score >= 20 || hasContent) candidates.push({doc, score, depth});
+        if (score >= 40) candidates.push({doc, score, depth});
       }
       for (const frame of doc.querySelectorAll('iframe')) {
         if (!frame.getClientRects().length) continue;
@@ -71,7 +78,8 @@ function pageAction(action, arg) {
       }
     }
     visit(document, 0, null);
-    return candidates.sort((a,b)=>b.score-a.score||b.depth-a.depth).map(c=>c.doc);
+    const leaves=candidates.filter(candidate=>!candidates.some(other=>other!==candidate&&[...candidate.doc.querySelectorAll('iframe')].some(frame=>{try{return frame.contentDocument===other.doc;}catch{return false;}})));
+    return leaves.sort((a,b)=>b.score-a.score||b.depth-a.depth).map(c=>c.doc);
   }
 
   function findDetailId() {
@@ -83,8 +91,7 @@ function pageAction(action, arg) {
       const m = txt.match(/REQ_ID\s*:\s*(REQ-[\w./\\-]+(?:\.[A-Za-z0-9]+)?\w*)/i);
       if (m) return m[1].trim();
     }
-    const idEl = elements.find(el => el.children.length === 0 && /^REQ-[\w./\\-]+(?:\.[A-Za-z0-9]+)?\w*$/i.test((el.innerText||'').trim()));
-    if (idEl) return (idEl.innerText || '').trim();
+    // 2026-10-16 김기덕: 그리드 ID 셀을 상세 헤더로 간주하지 않는다.
     const mBody = (document.body.innerText || document.body.textContent || '').match(/REQ_ID\s*:\s*(REQ-[\w./\\-]+(?:\.[A-Za-z0-9]+)?\w*)/i);
     return mBody ? mBody[1].trim() : '';
   }
@@ -116,7 +123,7 @@ function pageAction(action, arg) {
       el.click?.();
     };
     fire(cell);
-    if (cell !== row) fire(row);
+    // 2026-10-16 김기덕: 버블링되는 클릭은 한 번만 발생시켜 중복 상세 조회를 방지한다.
     return {ok:true};
   }
 
@@ -154,9 +161,12 @@ function pageAction(action, arg) {
     }));
   }
 
-  // Fallback: if no iframe editor found or body is empty, search main document near '요청내용'
+  // 2026-10-16 김기덕: 검색조건이나 처리내용을 본문으로 오인하는 광역 fallback을 제거한다.
   if (!text && !images.length) {
-    const contentEditable = document.querySelector('[contenteditable="true"]');
+    const areas=[...document.querySelectorAll('[contenteditable="true"]')].filter(visible);
+    const labelled=areas.filter(e=>e.hasAttribute('data-pms-request-content')||/요청\s*내용/.test(e.getAttribute('aria-label')||''));
+    const candidates=labelled.length?labelled:detailId&&!editors.length?areas:[];
+    const contentEditable = candidates.length===1?candidates[0]:null;
     if (contentEditable) {
       text = (contentEditable.innerText || contentEditable.textContent || '').trim();
       images = [...contentEditable.querySelectorAll('img')].map(img=>({
@@ -165,33 +175,36 @@ function pageAction(action, arg) {
         width: img.naturalWidth,
         height: img.naturalHeight
       }));
-    } else {
-      const reqLabels = [...document.querySelectorAll('.cl-text, .cl-output, label, span, div')].filter(visible);
-      const reqContentLabel = reqLabels.find(e => /요청\s*내용/i.test((e.innerText||'').trim()) && e.children.length === 0);
-      if (reqContentLabel) {
-        const container = reqContentLabel.closest('.cl-layout, [role="form"], div') || reqContentLabel.parentElement;
-        if (container) {
-          const editArea = container.querySelector('[contenteditable="true"], .se2_inputarea, [class*="editor"], [class*="edit"]');
-          const targetArea = editArea || container;
-          text = (targetArea.innerText || targetArea.textContent || '').replace(/요청\s*내용/g, '').trim();
-          images = [...targetArea.querySelectorAll('img')].filter(img => !img.src.includes('icon') && !img.src.includes('btn')).map(img=>({
-            src: img.currentSrc || img.src,
-            alt: img.alt || '',
-            width: img.naturalWidth,
-            height: img.naturalHeight
-          }));
-        }
-      }
     }
   }
 
-  const busy = [...document.querySelectorAll('.cl-text,[role="alert"],[role="status"]')].filter(visible).some(e => /처리\s*중입니다|잠시만\s*기다려\s*주세요/.test(e.textContent||''));
+  // 2026-10-16 김기덕: 숨김·투명·클리핑·다른 요소에 가려진 로딩 문구를 처리중으로 오인하지 않는다.
+  function painted(element){
+    if(!visible(element))return false;
+    let area=element.getBoundingClientRect();
+    let left=Math.max(0,area.left),top=Math.max(0,area.top),right=Math.min(innerWidth,area.right),bottom=Math.min(innerHeight,area.bottom);
+    if(right<=left||bottom<=top)return false;
+    for(let node=element;node;node=node.parentElement){
+      const style=getComputedStyle(node);
+      if(node.hidden||node.getAttribute('aria-hidden')==='true'||style.display==='none'||style.visibility==='hidden'||style.visibility==='collapse'||style.opacity!==''&&Number(style.opacity)===0)return false;
+      if(node!==element){
+        const bounds=node.getBoundingClientRect();
+        if(/hidden|clip|scroll|auto/.test(style.overflowX)){left=Math.max(left,bounds.left);right=Math.min(right,bounds.right);}
+        if(/hidden|clip|scroll|auto/.test(style.overflowY)){top=Math.max(top,bounds.top);bottom=Math.min(bottom,bounds.bottom);}
+        if(right<=left||bottom<=top)return false;
+      }
+    }
+    if(typeof document.elementFromPoint!=='function')return true;
+    const hit=document.elementFromPoint((left+right)/2,(top+bottom)/2);
+    return !!hit&&(element===hit||element.contains(hit)||hit===element.parentElement);
+  }
+  const busy = [...document.querySelectorAll('.cl-text,[role="alert"],[role="status"]')].some(e => /^(?:처리\s*중입니다\.?|잠시만\s*기다려\s*주세요\.?)$/.test((e.textContent||'').trim())&&painted(e));
   const editorReady = !!editor || !!text || images.length > 0;
 
   return {
     rows,
     visibleRows,
-    expected: Math.max(0, Number(grid.getAttribute('aria-rowcount')||0)-1),
+    expected: rowCount-1,
     scrollTop: scroller?.scrollTop || 0,
     scrollLeft: horizontal?.scrollLeft || 0,
     atEnd: !scroller || scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2,
@@ -202,7 +215,7 @@ function pageAction(action, arg) {
     editorReady,
     busy,
     editorUpdated: !capture || capture.id !== detailId || capture.alreadySelected || capture.changed,
-    editorError: ''
+    editorError: editors.length>1?'요청내용 편집기 후보가 여러 개입니다. 다른 상세 화면을 닫고 다시 조회하세요.':''
   };
 }
 module.exports = {pageAction};

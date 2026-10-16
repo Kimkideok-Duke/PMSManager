@@ -35,14 +35,14 @@ class Collector {
   }
   async detail(id,signal) {
     await this.call('select',id);
-    // Trust the exact detail header when available, or accept stable editor content.
+    // 2026-10-16 김기덕: 상세ID가 없으면 이전 요청 본문을 잘못 저장할 수 있어 수집하지 않는다.
     const start=Date.now();let last='',stable=0,lastSnap={};
     while(Date.now()-start<18000) {
       await sleep(350,signal);
       const snap=await this.call('snapshot');
       lastSnap=snap;
       if(snap.editorError) throw new Error(snap.editorError);
-      const idMatch = !snap.detailId || snap.detailId === id;
+      const idMatch = snap.detailId === id;
       if(!idMatch || !snap.editorReady || snap.busy) {stable=0;last='';continue;}
       const key=digest(JSON.stringify([snap.text,snap.images]));
       stable=key===last?stable+1:0;last=key;
@@ -81,7 +81,8 @@ class Collector {
         await sleep(180,signal);
         const snap=await this.call('snapshot');
         if(original.expected!==snap.expected) throw new Error('수집 중 목록 건수가 바뀌었습니다. 다시 조회하고 실행하세요.');
-        for(const row of snap.rows) discovered.set(row.id,{...(metadata.get(row.rowIndex)||{}),...row});
+        // 2026-10-16 김기덕: 수평 가상화로 비어 있는 열은 왼쪽에서 읽은 값을 보존한다.
+        for(const row of snap.rows){const merged={...(metadata.get(row.rowIndex)||{}),...row};for(const key of ['title','category','registeredAt','status'])if(!row[key])merged[key]=metadata.get(row.rowIndex)?.[key]||'';discovered.set(row.id,merged);}
         this.progress({phase:'목록 탐색',message:`요청ID ${discovered.size}/${original.expected}건 확인`,current:discovered.size,total:original.expected});
         if(discovered.size===original.expected) break;
         if(snap.atEnd) break;
@@ -114,8 +115,9 @@ class Collector {
           results.push(snapshot);
         } catch(e) {if(signal?.aborted) throw e;results.push({...row,error:e.message,collectedAt:new Date().toISOString()});}
         const result=results[results.length-1];
-        if(onItem)await onItem(result,results.length,discovered.size);
         this.progress({phase:'상세 수집',requestId:row.id,status:result.error?'상세 읽기 실패':result.contentComplete?'수집 완료':'이미지·본문 확인 필요',message:`${row.id} · ${result.error?'상세 읽기 실패':result.contentComplete?'수집 완료':'이미지 확인 필요'}`,current:results.length,total:discovered.size});
+        // 2026-10-16 김기덕: 분석 완료 상태를 수집 완료 상태로 덮어쓰지 않는다.
+        if(onItem)await onItem(result,results.length,discovered.size);
       }
       return results;
     } finally {
@@ -134,7 +136,8 @@ class Collector {
       mime=m[1];bytes=Buffer.from(m[2],'base64');
     } else {
       const url=new URL(image.src);
-      const isAllowed = url.origin === PMS_ORIGIN || (url.hostname.endsWith('daewooenc.com') && url.protocol === 'https:');
+      // 2026-10-16 김기덕: 유사 도메인을 제외하고 회사의 정확한 도메인 경계를 검사한다.
+      const isAllowed = !url.username&&!url.password&&(url.origin === PMS_ORIGIN || ((url.hostname==='daewooenc.com'||url.hostname.endsWith('.daewooenc.com')) && url.protocol === 'https:'));
       if(!isAllowed) throw new Error('PMS 외부의 이미지 주소입니다.');
       const response=await this.contents.session.fetch(url.href,{signal,redirect:'error'});
       if(!response.ok) throw new Error(`HTTP ${response.status}`);

@@ -1,14 +1,15 @@
 const {redact} = require('./source.cjs');
-const BASES = {openai:'https://api.openai.com/v1',anthropic:'https://api.anthropic.com/v1',gemini:'https://generativelanguage.googleapis.com/v1beta'};
+// 2026-10-16 김기덕: ChatGPT 플랜 연결도 공식 Responses API 주소만 사용한다.
+const BASES = {chatgpt:'https://api.openai.com/v1',openai:'https://api.openai.com/v1',anthropic:'https://api.anthropic.com/v1',gemini:'https://generativelanguage.googleapis.com/v1beta'};
 function endpoint(config) {
-  if (!['openai','anthropic','gemini','compatible'].includes(config.provider)) throw new Error('지원하지 않는 AI 공급자입니다.');
+  if (!['chatgpt','openai','anthropic','gemini','compatible'].includes(config.provider)) throw new Error('지원하지 않는 AI 공급자입니다.');
   const value=BASES[config.provider] || config.endpoint;
   const url=new URL(value);
   if(url.protocol!=='https:' || url.username || url.password || url.search || url.hash) throw new Error('AI API 주소는 인증정보·쿼리가 없는 HTTPS 주소여야 합니다.');
   return url.href.replace(/\/$/,'');
 }
 function headers(config,key) {
-  if(!key) throw new Error('AI API 키를 등록하세요.');
+  if(!key) throw new Error(config.provider==='chatgpt'?'ChatGPT로 로그인하세요.':'AI API 키를 등록하세요.');
   if(config.provider==='anthropic') return {'content-type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01'};
   if(config.provider==='gemini') return {'content-type':'application/json','x-goog-api-key':key};
   return {'content-type':'application/json',Authorization:`Bearer ${key}`};
@@ -16,16 +17,72 @@ function headers(config,key) {
 async function jsonFetch(url,init,fetcher=fetch) {
   const response=await fetcher(url,{...init,redirect:'error'});
   if(!response.ok) {
-    // Do not reflect server error bodies: they may echo source text or credentials.
+    // 2026-10-16 김기덕: 원문·비밀값은 반사하지 않고 알려진 오류 코드만 분류한다.
+    let code;try{code=(await limitedJson(response)).error?.code;}catch{}
+    const specific=errorExplanation(code);
     const explanation={400:'모델의 이미지 지원, 입력 길이, API 설정을 확인하세요.',401:'API 키가 유효하지 않습니다.',403:'이 모델의 사용 권한이 없습니다.',404:'모델명 또는 API 주소를 확인하세요.',413:'전송 자료가 너무 큽니다.',429:'사용 한도 또는 요청 속도 제한입니다. 잠시 후 재시도하세요.'}[response.status] || 'AI 서버 응답 오류입니다.';
-    throw new Error(`AI API HTTP ${response.status}: ${explanation}`);
+    throw new Error(`AI API HTTP ${response.status}: ${specific||explanation}`);
   }
+  if(JSON.parse(init.body||'{}').stream===true)return readResponseStream(response);
   const text=await response.text();
   if(text.length>4*1024*1024) throw new Error('AI 응답이 허용 크기를 넘었습니다.');
   try {return JSON.parse(text);} catch {throw new Error('AI 서버가 JSON 응답을 반환하지 않았습니다.');}
 }
+// 2026-10-16 김기덕: 결제 잔액, ChatGPT 플랜 제한 및 일시 제한을 구분한다.
+function errorExplanation(code){return {
+ credit_balance_exhausted:'API 크레딧이 소진됐습니다. API 결제 설정에서 잔액을 확인하세요. ChatGPT 구독 사용량은 ChatGPT 로그인 연결을 선택해야 합니다.',
+ insufficient_quota:'API 크레딧 또는 사용 한도를 확인하세요.',
+ project_spend_limit_exceeded:'API 프로젝트 지출 한도에 도달했습니다.',
+ organization_spend_limit_exceeded:'API 조직 지출 한도에 도달했습니다.',
+ subscription_sharing_usage_limit_exceeded:'ChatGPT 플랜 또는 이 앱의 사용 한도에 도달했습니다. 설정의 ChatGPT 사용량 관리에서 확인하세요.',
+ subscription_sharing_user_not_eligible:'이 ChatGPT 계정·워크스페이스에서는 플랜 연결을 사용할 수 없습니다.',
+ subscription_sharing_usage_unavailable:'ChatGPT 사용량을 확인할 수 없습니다. 잠시 후 다시 시도하세요.',
+ subscription_sharing_unsupported_capability:'이 요청 기능 또는 모델은 ChatGPT 플랜 연결에서 지원하지 않습니다.',
+ subscription_sharing_route_not_supported:'ChatGPT 플랜 연결의 API 경로가 지원되지 않습니다.',
+ rate_limit_exceeded:'일시적인 요청·토큰 속도 제한입니다. 잠시 후 다시 시도하세요.',
+ slow_down:'요청 속도가 너무 빠릅니다. 잠시 후 다시 시도하세요.'
+}[code]||'';}
+async function limitedJson(response){const reader=response.body?.getReader();if(!reader)return {};let size=0,text='';const decoder=new TextDecoder();try{while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>65536)throw Error('응답 크기 초과');text+=decoder.decode(value,{stream:true});}return JSON.parse(text+decoder.decode());}finally{await reader.cancel().catch(()=>{});}}
+async function readResponseStream(response){
+ const reader=response.body?.getReader();if(!reader)throw Error('ChatGPT 응답 스트림이 없습니다.');
+ // 2026-10-16 김기덕: 완료 이벤트의 output이 비어도 앞서 전달된 메시지·본문 이벤트를 보존한다.
+ const decoder=new TextDecoder(),items=new Map(),parts=new Map();let buffer='',data=[],completed=null,size=0;
+ function textPart(event,text,append=false){
+  const output=event.output_index??0,content=event.content_index??0;
+  if(!Number.isInteger(output)||output<0||output>1024||!Number.isInteger(content)||content<0||content>1024||typeof text!=='string')throw Error('ChatGPT 텍스트 이벤트 형식이 올바르지 않습니다.');
+  const key=output+':'+content,old=parts.get(key);parts.set(key,{output,content,text:append?(old?.text||'')+text:text});
+ }
+ function dispatch(){if(!data.length)return;const raw=data.join('\n');data=[];if(raw==='[DONE]')return;let event;try{event=JSON.parse(raw);}catch{throw Error('ChatGPT 응답 스트림 형식이 올바르지 않습니다.');}
+  if(event.type==='response.failed'||event.type==='error')throw Error(errorExplanation(event.response?.error?.code||event.error?.code||event.code)||'ChatGPT 응답 처리가 실패했습니다. 계정 연결과 사용량을 확인하세요.');
+  if(event.type==='response.incomplete')throw Error('ChatGPT 응답이 완료되지 않았습니다. 더 간단한 요청으로 다시 시도하세요.');
+  if(event.type==='response.output_text.delta')textPart(event,event.delta,true);
+  if(event.type==='response.output_text.done')textPart(event,event.text);
+  if(event.type==='response.content_part.done'&&event.part?.type==='output_text')textPart(event,event.part.text);
+  if(event.type==='response.output_item.done'&&event.item?.type==='message'&&event.item.role==='assistant'){
+   const index=event.output_index??items.size;if(!Number.isInteger(index)||index<0||index>1024)throw Error('ChatGPT 메시지 이벤트 형식이 올바르지 않습니다.');items.set(index,event.item);
+  }
+  if(event.type==='response.completed'){if(!event.response||event.response.status!=='completed')throw Error('ChatGPT 완료 응답을 확인하지 못했습니다.');completed=event.response;}
+ }
+ try{while(true){const {done,value}=await reader.read();if(done){buffer+=decoder.decode();break;}size+=value.byteLength;if(size>8*1024*1024)throw Error('ChatGPT 응답이 허용 크기를 넘었습니다.');buffer+=decoder.decode(value,{stream:true});let end;while((end=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,end).replace(/\r$/,'');buffer=buffer.slice(end+1);if(!line)dispatch();else if(line.startsWith('data:'))data.push(line.slice(5).replace(/^ /,''));}}
+  if(buffer.startsWith('data:'))data.push(buffer.slice(5).trimStart());dispatch();if(!completed)throw Error('ChatGPT 연결이 완료 응답 전에 종료됐습니다. 분석 결과를 저장하지 않았습니다.');
+  const hasText=output=>(output||[]).some(item=>item.type==='message'&&item.role==='assistant'&&item.content?.some(part=>part.type==='output_text'&&typeof part.text==='string'&&part.text.trim()));
+  if(!hasText(completed.output)){
+   const assembled=new Map(items);
+   for(const part of [...parts.values()].sort((a,b)=>a.output-b.output||a.content-b.content)){
+    // A completed item is authoritative; do not append its delta text a second time.
+    if(hasText([items.get(part.output)].filter(Boolean)))continue;
+    let item=assembled.get(part.output);if(!item){item={type:'message',role:'assistant',content:[]};assembled.set(part.output,item);}
+    item.content[part.content]={type:'output_text',text:part.text};
+   }
+   completed={...completed,output:[...assembled.entries()].sort(([a],[b])=>a-b).map(([,item])=>item)};
+  }
+  return completed;
+ }finally{await reader.cancel().catch(()=>{});}
+}
 async function listModels(config,key,fetcher=fetch) {
   const data=await jsonFetch(endpoint(config)+'/models',{headers:headers(config,key),signal:AbortSignal.timeout(30000)},fetcher);
+  // 2026-10-16 김기덕: ChatGPT 계정 모델 목록의 표시명과 서버 정렬을 보존한다.
+  if(config.provider==='chatgpt')return (data.models||[]).filter(m=>m.visibility==='list'&&typeof m.slug==='string').map(m=>({id:m.slug,name:m.display_name||m.slug}));
   const values=config.provider==='gemini' ? (data.models||[]).filter(m=>m.supportedGenerationMethods?.includes('generateContent')).map(m=>m.name.replace(/^models\//,'')) : (data.data||[]).map(m=>m.id);
   return [...new Set(values)].sort();
 }
@@ -52,9 +109,11 @@ function buildRequest(config,key,request,context,conversation=null) {
   const text=conversation ? JSON.stringify({context:JSON.parse(promptFor(request,context)),previousAnalysis:request.analysis?.report?redact(JSON.stringify(request.analysis.report)):undefined,analysisStale:!!request.analysisStale,note:redact(request.note||'')}) : promptFor(request,context);
   const turns=(conversation||[]).map(m=>({role:m.role,content:redact(m.content)}));
   let url,body;
-  if(config.provider==='openai') {
+  if(config.provider==='openai'||config.provider==='chatgpt') {
     url=base+'/responses';
     body={model:config.model,store:false,instructions:system,max_output_tokens:8192,input:[{role:'user',content:[{type:'input_text',text},...images.map(i=>({type:'input_image',image_url:`data:${i.mime};base64,${i.data}`,detail:'high'}))]},...turns]};
+    // 2026-10-16 김기덕: 플랜 연결은 스트리밍 필수이며 출력 토큰 한도 필드는 지원하지 않는다.
+    if(config.provider==='chatgpt'){delete body.max_output_tokens;body.stream=true;}
   } else if(config.provider==='anthropic') {
     url=base+'/messages';
     body={model:config.model,max_tokens:8192,system,messages:[{role:'user',content:[...images.map(i=>({type:'image',source:{type:'base64',media_type:i.mime,data:i.data}})),{type:'text',text}]}]};
@@ -92,7 +151,7 @@ async function analyze(config,key,request,context,signal,fetcher=fetch) {
 }
 function responseText(config,data){
   let raw;
-  if(config.provider==='openai') {
+  if(config.provider==='openai'||config.provider==='chatgpt') {
     if(data.status==='incomplete') throw new Error('AI 출력 한도에 도달해 결과가 잘렸습니다. 더 간단한 요청이나 다른 모델로 재시도하세요.');
     raw=(data.output||[]).flatMap(o=>o.content||[]).filter(c=>c.type==='output_text').map(c=>c.text).join('\n');
   } else if(config.provider==='anthropic') {

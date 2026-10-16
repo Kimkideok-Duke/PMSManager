@@ -4,6 +4,32 @@ const {JSDOM}=require('jsdom');
 const {pageAction}=require('../src/pms/page.cjs');
 const {Collector}=require('../src/pms/collector.cjs');
 const id='REQ-ec/Main.xfdl1',second='REQ-ec/Other.xfdl2';
+// 2026-10-16 김기덕: 상세 헤더와 편집기 오인 방지를 검증한다.
+test('상세 헤더가 없을 때 그리드 ID를 상세ID로 오인하지 않는다',()=>{
+ const {dom,w,call}=page();w.document.getElementById('detail').remove();assert.equal(call('snapshot').detailId,'');dom.window.close();
+});
+test('전체 건수가 누락되면 빈 조회로 처리하지 않는다',()=>{
+ const {dom,w,call}=page();w.document.querySelector('[role="grid"]').removeAttribute('aria-rowcount');assert.match(call('snapshot').error,/전체 건수/);dom.window.close();
+});
+// 2026-10-16 김기덕: 레이아웃만 남은 로딩 문구가 busy=true가 되는 현상을 재현한다.
+test('실제로 보이는 로딩 문구만 처리중으로 판단한다',()=>{
+ const {dom,w,call}=page();
+ try{
+  const layer=w.document.createElement('div'),message=w.document.createElement('span');message.className='cl-text';message.textContent='처리 중입니다.';layer.append(message);w.document.body.append(layer);
+  const rect={left:100,top:100,right:300,bottom:150,width:200,height:50};message.getBoundingClientRect=()=>rect;layer.getBoundingClientRect=()=>rect;w.document.elementFromPoint=()=>message;
+  assert.equal(call('snapshot').busy,true);
+  layer.style.opacity='0';assert.equal(call('snapshot').busy,false);layer.style.opacity='1';
+  layer.setAttribute('aria-hidden','true');assert.equal(call('snapshot').busy,false);layer.removeAttribute('aria-hidden');
+  layer.style.overflowX='hidden';layer.getBoundingClientRect=()=>({...rect,right:100,width:0});assert.equal(call('snapshot').busy,false);layer.style.overflowX='visible';
+  w.document.elementFromPoint=()=>w.document.body;assert.equal(call('snapshot').busy,false);
+ }finally{dom.window.close();}
+});
+test('임의 iframe은 요청내용으로 읽지 않는다',()=>{
+ const {dom,doc,call}=page('/unrelated.html');doc.body.innerHTML='<p>다른 화면</p>';assert.equal(call('snapshot').editorReady,false);dom.window.close();
+});
+test('요청내용 편집기 후보가 둘이면 모호한 본문을 수집하지 않는다',()=>{
+ const {dom,w,call}=page();const frame=w.document.createElement('iframe');frame.src='/smart_editor2_inputarea.html';w.document.body.append(frame);assert.match(call('snapshot').editorError,/여러 개/);dom.window.close();
+});
 function page(editorPath='/smart_editor2_inputarea.html',editorAttribute=''){
   const dom=new JSDOM(`<div class="cl-text" id="detail">REQ_ID : ${id}</div><div role="grid" aria-rowcount="3"><div role="row">메뉴명 요청ID</div>${[id,second].map((value,i)=>`<div role="row" data-rowindex="${i}" aria-selected="${i===0}"><div role="gridcell" data-cellindex="4">화면${i}</div><div role="gridcell" data-cellindex="5">오류</div><div role="gridcell" data-cellindex="9"><input value="등록"></div><div role="gridcell" data-cellindex="13">${value}</div></div>`).join('')}</div><iframe ${editorAttribute} src="${editorPath}"></iframe>`,{url:'https://ntest.daewooenc.com/expms/index.do',runScripts:'outside-only'});
   const w=dom.window;w.HTMLElement.prototype.getClientRects=function(){return [{}];};
@@ -13,6 +39,36 @@ function page(editorPath='/smart_editor2_inputarea.html',editorAttribute=''){
   const call=(action,arg)=>w.eval(`(${pageAction.toString()})(${JSON.stringify(action)},${JSON.stringify(arg??null)})`);
   return {dom,w,doc,call};
 }
+// 2026-10-16 김기덕: 실제 PMS에서 실패한 좌측 헤더 → 우측 헤더 → 복원 경로를 재현한다.
+test('메뉴명이 사라진 오른쪽 헤더에서도 요청 그리드와 요청ID를 읽고 왼쪽으로 복원한다',()=>{
+ const {dom,w,call}=page();
+ try{
+  const grid=w.document.querySelector('[role="grid"]'),header=grid.querySelector('[role="row"]');
+  const aggregate=w.document.createElement('div');aggregate.setAttribute('role','grid');aggregate.setAttribute('aria-rowcount','2');aggregate.innerHTML='<div role="row">No 단위시스템 총요청건 미처리건 처리</div>';grid.before(aggregate);
+  const scroller=w.document.createElement('div');scroller.style.overflowX='auto';grid.append(scroller);
+  Object.defineProperties(scroller,{scrollWidth:{value:1800},clientWidth:{value:600}});
+  scroller.addEventListener('scroll',()=>{header.textContent=scroller.scrollLeft>0?'구분 등록일자 등록자 처리상태 처리예정일자 처리일자 처리자명 요청ID':'F No 메뉴명 구분 등록일자 등록자 처리상태';});
+  header.textContent='F No 메뉴명 구분 등록일자 등록자 처리상태';
+  assert.equal(call('snapshot').expected,2);
+  assert.equal(call('columns','id').ok,true);assert.ok(!header.textContent.includes('메뉴명'));
+  const right=call('snapshot');assert.equal(right.error,undefined);assert.equal(right.rows[1].id,second);assert.equal(right.scrollLeft,1800);
+  assert.equal(call('scroll',0).ok,true);assert.equal(call('select',second).ok,true);
+  assert.equal(call('columns',0).ok,true);assert.ok(header.textContent.includes('메뉴명'));assert.equal(call('snapshot').expected,2);
+ }finally{dom.window.close();}
+});
+test('오른쪽 헤더만 렌더링되는 PMS 목록을 전체 수집해 요청별 분석 콜백까지 전달한다',async()=>{
+ const {dom,w,doc}=page(),processed=[];
+ try{
+  const grid=w.document.querySelector('[role="grid"]'),header=grid.querySelector('[role="row"]'),scroller=w.document.createElement('div');scroller.style.overflowX='auto';grid.append(scroller);
+  Object.defineProperties(scroller,{scrollWidth:{value:1800},clientWidth:{value:600}});
+  scroller.addEventListener('scroll',()=>{header.textContent=scroller.scrollLeft>0?'등록일자 등록자 처리상태 처리자명 요청ID':'메뉴명 구분 등록일자 처리상태';});
+  header.textContent='메뉴명 구분 등록일자 처리상태';
+  for(const cell of grid.querySelectorAll('[data-cellindex="13"]'))cell.addEventListener('click',()=>{w.document.getElementById('detail').textContent='REQ_ID : '+cell.textContent;doc.body.innerHTML='<p>'+cell.textContent+' 본문</p><img src="data:image/png;base64,aGVsbG8=">';});
+  const collector=new Collector({isDestroyed:()=>false,getURL:()=>w.location.href,executeJavaScriptInIsolatedWorld:async(_world,scripts)=>w.eval(scripts[0].code)});
+  const rows=await collector.collect(undefined,async row=>processed.push(row.id));
+  assert.deepEqual(processed,[id,second]);assert.equal(rows.length,2);assert.ok(rows.every(row=>!row.error&&row.images.length===1&&row.text===row.id+' 본문'));assert.equal(scroller.scrollLeft,0);
+ }finally{dom.window.close();}
+});
 test('실제 PMS와 같은 그리드·편집기 DOM에서 본문·이미지·전체 건수를 읽는다',()=>{
   const {dom,call}=page();const snap=call('snapshot');assert.equal(snap.expected,2);assert.equal(snap.rows.length,2);assert.equal(snap.visibleRows.length,2);assert.equal(snap.rows[0].status,'등록');assert.equal(snap.detailId,id);assert.equal(snap.text,'저장 오류');assert.equal(snap.images.length,1);dom.window.close();
 });

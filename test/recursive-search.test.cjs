@@ -4,6 +4,26 @@ const fs=require('node:fs/promises');
 const os=require('node:os');
 const path=require('node:path');
 const {indexProjects,buildContext,excerpts}=require('../src/core/source.cjs');
+// 2026-10-16 김기덕: EC/ECC 범위의 내용만 읽고 참조 파일을 확장하는지 확인한다.
+test('ECC0101은 EC/ECC와 직접 include 파일만 색인하고 다른 업무는 읽지 않는다',async t=>{
+ const {config}=await project(t,{'ui/EC/ECC/ECC0101.clx':'include "lib::common.xjs"; this.validateTicket();','ui/EC/ECC/Rules.js':'function validateTicket() { return false; }','lib/common.xjs':'function helper() {}','ui/EC/ECG/Other.clx':'unrelated','other/Unread.txt':'unrelated'});
+ const catalog=await indexProjects(config,null,()=>{},{scoped:true});assert.equal(catalog.stats.bytesRead,0);
+ const context=await buildContext({id:'REQ-ECC0101.xfdl1',text:'저장 검증'},catalog);
+ assert.equal(context.blocked,false);assert.equal(context.search.catalogFiles,5);assert.equal(context.search.indexedFiles,3);assert.equal(context.search.scope.folder,'ec/ecc');
+ assert.ok(context.files.some(f=>f.relative==='lib/common.xjs'));assert.ok(!context.files.some(f=>f.relative.includes('Other')));
+});
+test('업무 경로를 못 찾으면 전체 검색 확대로 표시한다',async t=>{
+ const {config}=await project(t,{'server/Unknown.java':'class Unknown { void distinctFail() {} }'});
+ const catalog=await indexProjects(config,null,()=>{},{scoped:true});
+ const context=await buildContext({id:'REQ-ECC0101.xfdl1',text:'distinctFail'},catalog);
+ assert.equal(context.blocked,false);assert.ok(context.search.scope.stages.some(s=>s.stage.includes('전체 범위')));
+});
+// 2026-10-16 김기덕: 실제 icms의 원본·생성본·배포본 중복 검색을 방지한다.
+test('clx-build와 webapps 중복본은 제외하고 clx-src 원본만 검색한다',async t=>{
+ const {config}=await project(t,{'icms-ui/clx-src/app/ec/ecc/ECC0101.clx':'this.validScreen();','icms-ui/clx-build/app/ec/ecc/ECC0101.clx':'duplicate','webapps/app/ec/ecc/ECC0101.clx':'duplicate','work/ec/ecc/ECC0101.clx':'duplicate'});
+ const catalog=await indexProjects(config,null,()=>{},{scoped:true});assert.equal(catalog.files.length,1);assert.equal(catalog.stats.excludedDirectories,3);
+ const context=await buildContext({id:'REQ-ECC0101.xfdl1',text:''},catalog);assert.equal(context.files.length,1);assert.match(context.files[0].relative,/clx-src/);
+});
 
 async function project(t,content){
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'icms-search-'));
