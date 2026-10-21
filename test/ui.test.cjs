@@ -6,6 +6,35 @@ const {JSDOM}=require('jsdom');
 const uiScript=async()=> (await Promise.all(['activity.js','chat.js','app.js'].map(name=>fs.readFile(path.join(__dirname,'../src/ui',name),'utf8')))).join('\n');
 const tick=()=>new Promise(r=>setTimeout(r,25));
 
+// 2026-10-21 김기덕: 코드 비교를 안전하게 표시하고 사용자 클릭이 있을 때만 적용한다.
+test('변경 전후·정확한 줄을 표시하고 수정하기 클릭으로만 적용한다',async()=>{
+ const dom=new JSDOM(await fs.readFile(path.join(__dirname,'../src/ui/index.html'),'utf8'),{runScripts:'outside-only'}),w=dom.window,d=w.document;let applied;
+ const row={id:'REQ-a.xfdl1',text:'크기 표시',images:[],analysisInput:'크기 표시',analysis:{createdAt:'analysis-1',requestText:'크기 표시',report:{summary:'크기 수정',causes:[],changes:[{path:'P/a.js',startLine:10,endLine:11,before:'size = bytes;',after:'// 2026-10-21 김기덕: KB 표시\nsize = bytes / 1024;',reason:'B를 KB로 환산',verified:true}]}}};
+ w.pms={state:async()=>({settings:{projects:[],ai:{provider:'openai',model:'test',hasKey:true}},requests:[row]}),onProgress:()=>{},detail:async()=>row,'apply-changes':async payload=>{applied=payload;row.analysis.applied={backupDirectory:'test-backup'};return row.analysis.applied;}};
+ try{w.eval(await uiScript());await tick();d.querySelector('.request-row').click();await tick();assert.equal(applied,undefined);assert.match(d.getElementById('detail').textContent,/P\/a.js:10–11/);assert.equal(d.querySelector('.patch-code').textContent,'size = bytes;');
+ [...d.querySelectorAll('#detail button')].find(b=>b.textContent==='수정하기').click();await tick();await tick();assert.equal(applied.id,row.id);assert.equal(applied.createdAt,'analysis-1');assert.equal(applied.text,'크기 표시');assert.match(d.getElementById('detail').textContent,/수정 적용 완료/);assert.equal([...d.querySelectorAll('#detail button')].find(b=>b.textContent==='수정하기').disabled,true);
+ }finally{w.close();}
+});
+
+// 2026-10-20 김기덕: 선택 상세만 읽고 요청별 초안을 유지하며 명시적인 분석 클릭만 전송한다.
+test('선택 상세 → 내용 편집 → 수동 분석에서 요청별 초안과 간결한 결과를 유지한다',async()=>{
+ const dom=new JSDOM(await fs.readFile(path.join(__dirname,'../src/ui/index.html'),'utf8'),{runScripts:'outside-only'}),w=dom.window,d=w.document;
+ const rows=[{id:'REQ-a.xfdl1',title:'A',detailPending:true},{id:'REQ-b.xfdl2',title:'B',detailPending:true}];let reads=[],analyses=[];
+ const settings={projects:[],ai:{provider:'openai',model:'test',hasKey:true}};
+ w.pms={state:async()=>({settings,requests:rows}),onProgress:()=>{},detail:async id=>rows.find(r=>r.id===id),
+ 'read-request':async id=>{reads.push(id);Object.assign(rows.find(r=>r.id===id),{text:id+' 원문',images:[],detailPending:false});},
+ 'analyze-request':async input=>{analyses.push(input);Object.assign(rows.find(r=>r.id===input.id),{analysisInput:input.text,analysis:{requestText:input.text,report:{summary:'요청 요약',causes:[{title:'검증 조건',fix:'삭제 행 제외',evidence:[{path:'P/main.js',line:10,verified:true,detail:'삭제된 행도 검증함'}]}],textFindings:['잡다한 관찰'],resolutionSteps:[{title:'장황한 절차'}]}}});}};
+ try{
+  w.eval(await uiScript());await tick();d.querySelectorAll('.request-row')[0].click();await tick();await tick();assert.deepEqual(reads,['REQ-a.xfdl1']);assert.equal(analyses.length,0);
+  let editor=d.getElementById('analysis-input');editor.value='A 수정 초안';editor.dispatchEvent(new w.Event('input'));
+  d.querySelectorAll('.request-row')[1].click();await tick();await tick();assert.equal(reads.length,2);d.querySelectorAll('.request-row')[0].click();await tick();
+  assert.equal(d.getElementById('analysis-input').value,'A 수정 초안');
+  [...d.querySelectorAll('#detail button')].find(b=>b.textContent==='분석').click();await tick();await tick();assert.equal(analyses.length,1);assert.equal(analyses[0].text,'A 수정 초안');
+  const detail=d.getElementById('detail').textContent;assert.match(detail,/P\/main.js:10/);assert.match(detail,/수정 이유: 삭제된 행도 검증함/);assert.match(detail,/수정 방법: 삭제 행 제외/);assert.doesNotMatch(detail,/잡다한 관찰|장황한 절차/);
+  assert.equal(d.getElementById('chat-input').disabled,false);
+ }finally{w.close();}
+});
+
 // 2026-10-16 김기덕: 플랜 연결의 계정 선택·로그인 취소·모델 표시명과 안내를 검증한다.
 test('ChatGPT 연결은 API 키 입력을 숨기고 로그인 결과와 계정별 모델을 표시한다',async()=>{
  const dom=new JSDOM(await fs.readFile(path.join(__dirname,'../src/ui/index.html'),'utf8'),{runScripts:'outside-only'}),w=dom.window,d=w.document;let connected,received;
@@ -50,18 +79,20 @@ test('앱 화면이 빈 상태에서 시작하고 요청 선택·이미지·분�
   w.pms={state:async()=>({settings,requests:[row],dataPath:'local'}),detail:async()=>row,onProgress:()=>{}};
   w.eval(script);await new Promise(resolve=>setTimeout(resolve,20));assert.equal(w.document.getElementById('stat-total').textContent,'1');
   w.document.querySelector('.request-row').click();await new Promise(resolve=>setTimeout(resolve,20));assert.ok(w.document.getElementById('detail').textContent.includes('오류 설명'));assert.ok(w.document.getElementById('detail').textContent.includes('원인 후보'));assert.equal(w.document.getElementById('detail').querySelector('script'),null);
-  assert.ok(w.document.getElementById('detail').textContent.includes('1,500개 내용 검색'));assert.ok(w.document.getElementById('detail').textContent.includes('오류 해결 절차'));assert.ok(w.document.getElementById('detail').textContent.includes('삭제 행을 검증에서 제외'));
-  assert.ok(w.document.getElementById('detail').textContent.includes('요청 본문에서 확인한 내용'));assert.ok(w.document.getElementById('detail').textContent.includes('이미지에서 확인한 내용'));
+  // 2026-10-20 김기덕: 결과는 요청 요약과 수정안만 표시하고 기존의 장황한 항목을 제외한다.
+  assert.equal(w.document.getElementById('analysis-input').value,'오류 설명');
+  for(const text of ['1,500개 내용 검색','오류 해결 절차','요청 본문에서 확인한 내용','이미지에서 확인한 내용'])assert.ok(!w.document.getElementById('detail').textContent.includes(text));
   w.document.querySelector('.request-row input').click();assert.equal(w.document.getElementById('selection-count').textContent,'1개 선택');
   w.document.querySelector('[data-page="settings"]').click();assert.equal(w.document.getElementById('settings-page').hidden,false);dom.window.close();
 });
 
-test('자동 분석 버튼이 수집·비교·분석 IPC를 호출하고 생략 건수를 표시한다',async()=>{
+// 2026-10-20 김기덕: 목록 버튼은 수집만 호출하고 AI 분석은 실행하지 않는다.
+test('목록 버튼은 목록만 조회하고 분석할 요청 선택을 안내한다',async()=>{
  const html=await fs.readFile(path.join(__dirname,'../src/ui/index.html'),'utf8'),script=await uiScript();
  const dom=new JSDOM(html,{runScripts:'outside-only',url:'file:///app/index.html'}),w=dom.window;let received;
  const settings={projects:[],ai:{provider:'openai',endpoint:'https://api.openai.com/v1',model:'example',hasKey:true}};
- w.pms={state:async()=>({settings,requests:[],dataPath:'local'}),onProgress:()=>{},sync:async input=>{received=input;return {requests:[],ids:[],collected:3,unchanged:2,done:1,failed:0,blocked:0};}};
- try{w.eval(script);await new Promise(r=>setTimeout(r,20));w.document.getElementById('ready').checked=true;w.document.getElementById('collect').click();await new Promise(r=>setTimeout(r,20));assert.equal(received.ready,true);assert.match(w.document.getElementById('toast').textContent,/동일 내용 생략 2건.*분석 완료 1건/);assert.equal(w.document.getElementById('collect').disabled,false);}finally{w.close();}
+ w.pms={state:async()=>({settings,requests:[],dataPath:'local'}),onProgress:()=>{},collect:async input=>{received=input;return {requests:[],ids:[],collected:3,unchanged:2,done:1,failed:0,blocked:0};}};
+ try{w.eval(script);await new Promise(r=>setTimeout(r,20));w.document.getElementById('ready').checked=true;w.document.getElementById('collect').click();await new Promise(r=>setTimeout(r,20));assert.equal(received.ready,true);assert.match(w.document.getElementById('toast').textContent,/요청 목록 3건.*분석할 요청을 선택/);assert.equal(w.document.getElementById('collect').disabled,false);}finally{w.close();}
 });
 // 2026-10-16 김기덕: 목록 동기화로 삭제된 요청의 상세·대화 선택을 해제한다.
 test('선택된 요청이 PMS 목록에서 사라지면 상세와 대화 대상을 해제한다',async()=>{

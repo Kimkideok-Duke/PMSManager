@@ -50,7 +50,8 @@ class Collector {
     }
     throw new Error(`상세 읽기 대기시간을 초과했습니다. 상세ID=${lastSnap.detailId||'없음'}, 편집기=${lastSnap.editorReady?'확인':'없음'}, PMS처리중=${lastSnap.busy?'예':'아니오'}`);
   }
-  async collect(signal,onItem) {
+  // 2026-10-20 김기덕: 목록 조회와 선택 요청 상세 읽기를 분리한다.
+  async collect(signal,onItem,options={}) {
     const original=await this.call('snapshot');
     const discovered=new Map(),results=[];
     if(!original.expected && !original.rows.length) return [];
@@ -92,8 +93,11 @@ class Collector {
         await this.call('scroll','next');
       }
       if(discovered.size!==original.expected) throw new Error(`목록 ${original.expected}건 중 ${discovered.size}건만 읽었습니다. 그리드 스크롤·페이지 상태를 확인하세요. 부분 목록을 전체로 처리하지 않습니다.`);
-      this.progress({phase:'상세 수집',items:[...discovered.values()].map(r=>({id:r.id,title:r.title,status:'수집 대기'})),current:0,total:discovered.size,message:'요청별 본문과 이미지 수집 시작'});
-      for(const row of [...discovered.values()].sort((a,b)=>a.rowIndex-b.rowIndex)) {
+      const ordered=[...discovered.values()].sort((a,b)=>a.rowIndex-b.rowIndex);
+      if(options.listOnly)return ordered;
+      if(options.onlyId&&!discovered.has(options.onlyId))throw Error('현재 PMS 목록에 없는 요청입니다. 목록을 다시 불러오세요.');
+      this.progress({phase:'상세 수집',items:ordered.filter(r=>!options.onlyId||r.id===options.onlyId).map(r=>({id:r.id,title:r.title,status:'수집 대기'})),current:0,total:options.onlyId?1:discovered.size,message:'선택 요청의 본문과 이미지 수집 시작'});
+      for(const row of ordered.filter(r=>!options.onlyId||r.id===options.onlyId)) {
         signal?.throwIfAborted();
         this.progress({phase:'상세 수집',requestId:row.id,title:row.title,status:'상세 수집 중',message:row.id,current:results.length,total:discovered.size});
         try {
@@ -122,7 +126,8 @@ class Collector {
       return results;
     } finally {
       try {
-        if(original.selectedId) {await this.locate(original.selectedId);await this.call('select',original.selectedId);}
+        // 2026-10-20 김기덕: 목록 조회는 행을 선택하지 않고 선택 상세 조회는 해당 행을 유지한다.
+        if(!options.listOnly&&!options.onlyId&&original.selectedId) {await this.locate(original.selectedId);await this.call('select',original.selectedId);}
         await this.call('columns',original.scrollLeft||0);
         await this.call('scroll',original.scrollTop);
       } catch {this.progress({phase:'수집',message:'원래 선택 행 복원에 실패했습니다. PMS 화면을 확인하세요.'});}

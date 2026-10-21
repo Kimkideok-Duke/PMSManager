@@ -4,10 +4,13 @@ const fs=require('node:fs/promises');
 const {pathToFileURL}=require('node:url');
 const {randomUUID}=require('node:crypto');
 const {Store,mergeRequests,reconcileRequests}=require('./core/store.cjs');
-const {needsAnalysis,recordAnalysis,upgradeRow}=require('./core/content.cjs');
+const {needsAnalysis,recordAnalysis,upgradeRow,contentFingerprint}=require('./core/content.cjs');
 const {runIncremental}=require('./core/incremental.cjs');
 const {indexProjects,buildContext}=require('./core/source.cjs');
 const ai=require('./core/ai.cjs');
+// 2026-10-21 김기덕: 미리 확인한 수정안만 사용자 버튼으로 백업·적용한다.
+const {applyChanges}=require('./core/patches.cjs');
+const {expandPatchContext}=require('./core/patch-context.cjs');
 // 2026-10-16 김기덕: ChatGPT 플랜 로그인은 암호화된 별도 계정 저장소에서 관리한다.
 const {ChatGPTAuth}=require('./core/chatgpt-auth.cjs');
 const {Collector,PMS_URL}=require('./pms/collector.cjs');
@@ -32,7 +35,7 @@ function idle(){if(job||chatJob||chatgpt?.pending||chatgpt?.refreshing)throw new
 function summaries(){return requests.map(({images,text,analysisHistory,chatMessages,analysis,...r})=>({...r,analysis:analysis?{createdAt:analysis.createdAt}:undefined,imageCount:images?.length||0,historyCount:analysisHistory?.length||0}));}
 function invalidate(){prepared=null;contexts.clear();}
 // 2026-10-16 김기덕: 수집·분석 실패 건수를 반영해 종료 상태를 표시한다.
-function handle(channel,fn){ipcMain.handle(channel,async(event,arg)=>{if(event.sender!==window.webContents||event.senderFrame!==window.webContents.mainFrame||event.senderFrame.url!==uiURL)throw new Error('허용되지 않은 호출');let tracked=false;try{if(['collect','sync','prepare','analyze'].includes(channel)){idle();tracker.begin({collect:'PMS 수집',sync:'자동 분석',prepare:'소스 검색',analyze:'AI 분석'}[channel]);tracked=true;}const value=await fn(arg);if(tracked){const completion=completionFor(value);tracker.end(completion.status,completion.message);}return {ok:true,value};}catch(e){if(tracked)tracker.end(e.name==='AbortError'?'중지':'실패',e.message);return {ok:false,error:e.name==='AbortError'?'작업을 중지했습니다.':e.message};}});}
+function handle(channel,fn){ipcMain.handle(channel,async(event,arg)=>{if(event.sender!==window.webContents||event.senderFrame!==window.webContents.mainFrame||event.senderFrame.url!==uiURL)throw new Error('허용되지 않은 호출');let tracked=false;try{if(['collect','sync','prepare','analyze','read-request','analyze-request'].includes(channel)){idle();tracker.begin({collect:'PMS 수집',sync:'자동 분석',prepare:'소스 검색',analyze:'AI 분석','read-request':'선택 요청 상세 읽기','analyze-request':'선택 요청 분석'}[channel]);tracked=true;}const value=await fn(arg);if(tracked){const completion=completionFor(value);tracker.end(completion.status,completion.message);}return {ok:true,value};}catch(e){if(tracked)tracker.end(e.name==='AbortError'?'중지':'실패',e.message);return {ok:false,error:e.name==='AbortError'?'작업을 중지했습니다.':e.message};}});}
 async function saveRequests(){await store.write('requests',requests);}
 function browserOptions(){return {width:1500,height:980,minWidth:1000,minHeight:700,title:'PMS · 직접 로그인 후 조회',webPreferences:{nodeIntegration:false,contextIsolation:true,sandbox:true,partition:'pms-manual-session'}};}
 async function openPMS(){
@@ -48,16 +51,12 @@ async function openPMS(){
   await pmsWindow.loadURL(PMS_URL);
 }
 function markdownFor(row){
+  // 2026-10-20 김기덕: 보고서도 실제 분석 요청과 핵심 수정안만 내보낸다.
   const a=row.analysis,r=a?.report;
-  const lines=[`# ${row.id}`,row.title||'',`수집: ${row.collectedAt||'-'}`,`검토: ${row.review||'미검토'}`,`메모: ${row.note||''}`,'','## 요청내용',row.text||''];
+  const lines=[`# ${row.id}`,row.title||'',`검토: ${row.review||'미검토'}`,`메모: ${row.note||''}`,'','## 분석 요청내용',a?.requestText??row.analysisInput??row.text??''];
   if(a){lines.push('','## 분석',`${a.provider} / ${a.model} · ${a.createdAt}`,row.analysisStale?'이 결과는 이전 자료에 기반합니다. 다시 분석하세요.':'',r.summary||r.raw||'');
-    for(const finding of r.textFindings||[])lines.push(`- 본문 관찰: ${finding}`);
-    for(const finding of r.imageFindings||[])lines.push(`- 이미지 관찰: ${finding}`);
-    if(a.search)lines.push('',`검색 범위: 하위 파일 ${a.search.indexedFiles}개 내용 색인 / ${a.search.selectedFiles}개 소스 발췌`);
-    if(r.executionFlow?.length)lines.push('','### 코드 처리 흐름',...r.executionFlow.map(s=>`- ${s}`));
-    for(const c of r.causes||[]){lines.push('',`### ${c.title} (가설 신뢰도: ${c.confidence})`,c.fix);for(const e of c.evidence||[])lines.push(`- ${e.path}:${e.line} ${e.verified?'[제공된 줄 확인]':'[근거 위치 미확인]'} ${e.detail}`);for(const t of c.tests||[])lines.push(`- 검증: ${t}`);}
-    for(const [i,step] of (r.resolutionSteps||[]).entries()){lines.push('',`### 해결 ${i+1}. ${step.title}`,step.action,`기대 결과: ${step.expected}`);for(const e of step.evidence||[])lines.push(`- ${e.path}:${e.line} ${e.verified?'[제공된 줄 확인]':'[근거 위치 미확인]'} ${e.detail}`);}
-    for(const m of [...(r.missing||[]),...(a.warnings||[])])lines.push(`- 확인 필요: ${m}`);
+    for(const c of (r.causes||[]).slice(0,3)){lines.push('',`### ${c.title}`,`수정 방법: ${c.fix}`);for(const e of c.evidence||[])lines.push(`- ${e.path}:${e.line} ${e.verified?'':'[근거 위치 미확인]'} 수정 이유: ${e.detail}`);}
+    for(const m of (r.missing||[]).slice(0,2))lines.push(`- 확인 필요: ${m}`);
   }return lines.join('\n');
 }
 
@@ -133,9 +132,81 @@ app.whenReady().then(async()=>{
     idle();if(!ready)throw new Error('PMS 로그인과 조건 입력·조회 완료를 체크하세요.');
     if(!pmsWindow||pmsWindow.isDestroyed())throw new Error('PMS 열기 버튼으로 창을 열고 로그인하세요.');
     job=new AbortController();invalidate();
-    // 2026-10-16 김기덕: 수집 전용 경로에서도 현재 PMS 목록과 동기화한다.
-    try{const incoming=await new Collector(pmsWindow.webContents,progress).collect(job.signal);requests=reconcileRequests(requests,incoming);await saveRequests();return {requests:summaries(),ids:incoming.filter(r=>!r.error).map(r=>r.id),collected:incoming.length,failed:incoming.filter(r=>r.error).length};}
+    // 2026-10-20 김기덕: 완전한 목록만 동기화하고 본문·수정 초안·대화는 보존한다. AI는 호출하지 않는다.
+    try{
+      const incoming=await new Collector(pmsWindow.webContents,progress).collect(job.signal,null,{listOnly:true});
+      job.signal.throwIfAborted();
+      requests=incoming.map(meta=>({...requests.find(r=>r.id===meta.id),...meta,detailPending:true}));
+      await saveRequests();return {requests:summaries(),ids:[],collected:incoming.length,failed:0};
+    }
     finally{job=null;progress({phase:'대기',message:'수집 작업 종료'});}
+  });
+  // 2026-10-20 김기덕: 선택 요청만 읽고 사용자 분석 요청은 PMS 원문과 분리해 저장한다.
+  handle('read-request',async id=>{
+    idle();const old=requests.find(r=>r.id===id);if(!old)throw Error('요청을 찾지 못했습니다.');
+    if(!pmsWindow||pmsWindow.isDestroyed())throw Error('PMS 창에서 로그인·조회 후 선택하세요.');
+    job=new AbortController();
+    try{
+      const [incoming]=await new Collector(pmsWindow.webContents,progress).collect(job.signal,null,{onlyId:id});
+      job.signal.throwIfAborted();
+      if(!incoming||incoming.error)throw Error(incoming?.error||'상세 내용을 읽지 못했습니다.');
+      const changed=old.contentFingerprint!==contentFingerprint(incoming);
+      const row={...old,...incoming,error:undefined,detailPending:false,syncStatus:'상세 확인 완료',contentFingerprint:contentFingerprint(incoming),analysisStale:!!old.analysis&&(changed||!!old.analysisStale)};
+      requests=requests.map(r=>r.id===id?row:r);contexts.delete(id);await saveRequests();return row;
+    }catch(e){
+      // 2026-10-20 김기덕: 상세 실패를 저장하고 이전 분석이 최신인 것처럼 표시되지 않게 한다.
+      old.error=e.name==='AbortError'?'상세 읽기를 중지했습니다.':e.message;old.detailPending=true;
+      old.analysisStale=!!old.analysis;old.syncStatus='상세 읽기 실패';await saveRequests();throw e;
+    }finally{job=null;}
+  });
+  handle('request-edit',async({id,text})=>{
+    idle();const row=requests.find(r=>r.id===id);if(!row)throw Error('요청을 찾지 못했습니다.');
+    if(typeof text!=='string'||!text.trim()||text.length>100000)throw Error('분석 요청내용은 1~100,000자로 입력하세요.');
+    row.analysisInput=text;row.analysisStale=!!row.analysis&&row.analysis.requestText!==text;contexts.delete(id);await saveRequests();return {saved:true};
+  });
+  handle('analyze-request',async({id,text})=>{
+    idle();const row=requests.find(r=>r.id===id);if(!row||row.detailPending||row.error||row.contentComplete===false)throw Error('PMS 상세 본문과 이미지를 먼저 확인하세요.');
+    if(typeof text!=='string'||!text.trim()||text.length>100000)throw Error('분석 요청내용은 1~100,000자로 입력하세요.');
+    if(!settings.ai.model)throw Error('AI 모델을 선택하세요.');
+    row.analysisInput=text;row.analysisStale=!!row.analysis;delete row.analysisError;
+    const snapshot=structuredClone({...row,text});job=new AbortController();
+    try{
+      await saveRequests();job.signal.throwIfAborted();
+      progress({phase:'소스 검색',requestId:id,title:row.title,status:'소스 검색 중',message:'선택 요청의 관련 소스를 찾습니다.'});
+      const index=await indexProjects(settings.projects.filter(p=>p.enabled),job.signal,progress,{scoped:true});
+      let context=await buildContext(snapshot,index,job.signal,progress);contexts.set(id,context);
+      if(context.blocked)throw Error('관련 소스를 찾지 못했습니다. 등록한 프로젝트 폴더를 확인하세요.');
+      const key=await aiKey();job.signal.throwIfAborted();
+      progress({phase:'AI 응답 대기',requestId:id,status:'AI 응답 대기',message:'수정 위치와 방법을 분석합니다.'});
+      let result=await ai.analyze(settings.ai,key,snapshot,context,job.signal);job.signal.throwIfAborted();
+      // 2026-10-21 김기덕: 수정 코드가 없으면 AI가 지목한 파일·함수 단서로 한 번만 추가 검색한다.
+      if(!result.report?.changes?.some(c=>c.verified)&&result.report?.missing?.length){
+        progress({phase:'추가 소스 검색',requestId:id,status:'소스 검색 중',message:'구체적인 수정 위치를 추가로 찾습니다.'});
+        const searched=await buildContext({...snapshot,text:snapshot.text+'\n찾을 소스 단서:\n'+result.report.missing.join('\n')},index,job.signal,progress);
+        const deeper=await expandPatchContext(searched,index,result.report.missing,job.signal);
+        if(deeper.hash!==context.hash){context=deeper;contexts.set(id,context);result=await ai.analyze(settings.ai,key,snapshot,context,job.signal);job.signal.throwIfAborted();}
+      }
+      if(result.report?.formatWarning||typeof result.report?.summary!=='string'||!Array.isArray(result.report.causes))throw Error('수정 방향의 응답 형식이 올바르지 않습니다. 다시 분석해 주세요.');
+      row.analysisHistory=[...(row.analysisHistory||[]),...(row.analysis?[row.analysis]:[])].slice(-5);
+      row.analysis={...result,requestText:text,contentFingerprint:contentFingerprint(snapshot)};
+      row.analysisStale=false;row.syncStatus='분석 완료';delete row.analysisError;await saveRequests();return {done:1,failed:0};
+    }catch(e){row.analysisError=e.name==='AbortError'?'분석을 중지했습니다.':e.message;await saveRequests();throw e;}
+    finally{job=null;}
+  });
+  handle('apply-changes',async({id,createdAt,text})=>{
+    idle();const row=requests.find(r=>r.id===id),analysis=row?.analysis;
+    if(!analysis||analysis.createdAt!==createdAt||row.analysisStale||analysis.applied)throw Error('분석 결과가 변경됐거나 이미 적용됐습니다. 다시 분석하세요.');
+    if(text!==analysis.requestText||analysis.requestText!==(row.analysisInput??row.text))throw Error('분석 요청내용이 변경됐습니다. 다시 분석하세요.');
+    job=new AbortController();
+    try{
+      const application=await applyChanges({changes:analysis.report.changes,context:analysis.context,projects:settings.projects,backupRoot:path.join(app.getPath('userData'),'source-backups'),requestId:id,date:new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Seoul'}).format(new Date()),signal:job.signal});
+      analysis.applied=application;row.syncStatus='수정 적용 완료';
+      const paths=new Set(application.files.map(f=>f.path));
+      for(const other of requests)if(other!==row&&other.analysis?.sources?.some(f=>paths.has(f.path)))other.analysisStale=true;
+      invalidate();
+      try{await saveRequests();}catch{application.warning='소스 수정은 적용됐으나 앱의 결과 기록 저장에 실패했습니다. 백업 폴더의 manifest.json을 확인하세요.';}
+      return application;
+    }finally{job=null;}
   });
   handle('sync',async({ready})=>{
     idle();if(!ready)throw new Error('PMS 로그인과 조건 입력·조회 완료를 체크하세요.');
@@ -204,11 +275,12 @@ app.whenReady().then(async()=>{
   handle('chat',async({id,message})=>{
     if(chatJob)throw new Error('LLM 답변을 기다리고 있습니다.');
     const row=requests.find(r=>r.id===id);
-    if(!row||row.error)throw new Error('상세 내용을 수집한 요청을 선택하세요.');
+    if(!row||row.error||row.detailPending)throw new Error('상세 내용을 수집한 요청을 선택하세요.');
     if(typeof message!=='string'||!message.trim()||message.length>10000)throw new Error('메시지는 1~10,000자로 입력하세요.');
     const config={...settings.ai};
     if(!config.model)throw new Error('AI 모델을 먼저 설정하세요.');
-    const snapshot=structuredClone(row);
+    // 2026-10-20 김기덕: 보완 대화도 사용자가 수정한 분석 요청을 기준으로 진행한다.
+    const snapshot=structuredClone({...row,text:row.analysisInput??row.text});
     const context=structuredClone(contexts.get(id)||row.analysis?.context||{target:'소스 미연결',files:[],warnings:['소스 발췌가 없습니다. 소스 검색 후 대화하면 근거를 보완할 수 있습니다.'],hash:null});
     const user={role:'user',content:message.trim(),createdAt:new Date().toISOString(),contentFingerprint:row.contentFingerprint};
     const history=(snapshot.chatMessages||[]).slice(-20);

@@ -1,6 +1,8 @@
 const $=id=>document.getElementById(id);
 const api=window.pms;
 let settings,requests=[],selected=new Set(),activeId=null,busy=false,preview=null,toastTimer;
+// 2026-10-20 김기덕: 요청별 편집 초안은 화면 전환과 진행 갱신에도 유지한다.
+const analysisDrafts=new Map();
 const BASES={chatgpt:'https://api.openai.com/v1',openai:'https://api.openai.com/v1',anthropic:'https://api.anthropic.com/v1',gemini:'https://generativelanguage.googleapis.com/v1beta',compatible:''};
 // 2026-10-16 김기덕: 선택된 연결 방식과 승인 상태를 표시하고 비밀 토큰은 화면에 보관하지 않는다.
 function modelLabel(){return settings.ai.model?`${settings.ai.provider==='chatgpt'?'ChatGPT 플랜':settings.ai.provider} · ${settings.ai.model}`:'AI 연결 전';}
@@ -37,7 +39,7 @@ function drawRows(){
     top.append(el('b',r.title||'제목 없음'),el('span',state[0],'pill '+state[1]));
     content.append(top,el('code',r.id,'row-id'));
     const meta=el('div',undefined,'row-meta');meta.append(el('span',`${r.category||'-'} · PMS ${r.status||'-'}`),el('span',`${r.imageCount}개 이미지 · ${r.review||'미검토'}`));if(r.syncStatus)meta.append(el('span',r.syncStatus));content.append(meta);row.append(check,content);
-    const activate=()=>run(async()=>{activeId=r.id;drawRows();await drawDetail();});row.addEventListener('click',activate);row.addEventListener('keydown',e=>{if(e.target===row&&e.key==='Enter')activate();});root.append(row);
+    const activate=()=>run(async()=>{if(busy)return;activeId=r.id;drawRows();if(r.detailPending){$('detail').replaceChildren(el('p','PMS에서 선택 요청의 본문과 사진을 읽고 있습니다.'));await work(()=>api['read-request'](r.id));}else await drawDetail();});row.addEventListener('click',activate);row.addEventListener('keydown',e=>{if(e.target===row&&e.key==='Enter')activate();});root.append(row);
   }
   $('stat-total').textContent=requests.length;$('stat-done').textContent=requests.filter(r=>r.analysis&&!r.analysisStale&&!r.analysisError).length;
   $('stat-review').textContent=requests.filter(r=>r.analysis&&!['채택','보류'].includes(r.review)).length;$('stat-error').textContent=requests.filter(r=>stateOf(r)[2]==='attention').length;$('nav-count').textContent=requests.length;drawSelection();
@@ -57,21 +59,46 @@ function searchNode(search){
   for(const step of search.trace){const row=el('div',undefined,'evidence');row.append(el('code',`${step.from} → ${step.to}`),el('div',`${step.depth}단계 · ${step.reason}`));trace.append(row);}root.append(trace);
   return root;
 }
+// 2026-10-20 김기덕: 분석 결과는 요청 요약과 수정할 위치·이유·방법만 표시한다.
+// 2026-10-20 김기덕: 코드는 안전한 텍스트 노드로 강조하고 문장·개행별로 문단을 나눈다.
+function readableText(value,className='report-copy'){
+ const root=el('div',undefined,className);
+ for(const line of String(value||'').split(/\n+|(?<=[.!?])\s+(?=[가-힣A-Za-z])/).filter(s=>s.trim())){
+  const p=el('p'),pattern=/`([^`\n]+)`|\b[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\(\)|\b[A-Za-z_$][\w$]*(?:_[\w$]+|[a-z][A-Z][\w$]*)[\w$]*|s?[#,0-9]+\.[#09]+/g;let offset=0;
+  for(const match of line.matchAll(pattern)){p.append(document.createTextNode(line.slice(offset,match.index)),el('code',match[1]||match[0],'inline-code'));offset=match.index+match[0].length;}
+  p.append(document.createTextNode(line.slice(offset)));root.append(p);
+ }
+ return root;
+}
 function reportNode(analysis){
-  const s=el('div'),r=analysis.report;
-  s.append(el('small',`${analysis.provider} / ${analysis.model} · ${new Date(analysis.createdAt).toLocaleString()}`,'hint'));
-  if(r.formatWarning)s.append(el('div',r.formatWarning,'warning'));
-  if(r.raw){s.append(el('pre',r.raw));return s;}
-  s.append(el('div',r.summary,'report-summary'));
-  if(analysis.search)s.append(searchNode(analysis.search));
-  if(r.textFindings?.length){const text=section('요청 본문에서 확인한 내용');text.append(list(r.textFindings));s.append(text);}
-  if(r.executionFlow?.length){const flow=section('관련 코드의 처리 흐름');flow.append(list(r.executionFlow));s.append(flow);}
-  if(r.imageFindings?.length){const image=section('이미지에서 확인한 내용');image.append(list(r.imageFindings));s.append(image);}
-  for(const c of r.causes||[]){const cause=el('div',undefined,'cause');cause.append(el('h3',`${c.title} · 가설 신뢰도 ${c.confidence}`),el('p',c.fix));for(const e of c.evidence||[]){const evidence=el('div',undefined,'evidence');evidence.append(el('code',`${e.path}:${e.line} · ${e.verified?'제공된 줄 확인':'근거 위치 미확인'}`),el('div',e.detail));cause.append(evidence);}if(c.tests?.length){cause.append(el('h3','검증 절차'),list(c.tests));}s.append(cause);}
-  if(r.resolutionSteps?.length){const steps=section('오류 해결 절차');for(const [i,step] of r.resolutionSteps.entries()){const row=el('div',undefined,'cause');row.append(el('h3',`${i+1}. ${step.title}`),el('p',step.action),el('p',`기대 결과: ${step.expected}`));for(const e of step.evidence||[])row.append(el('div',`${e.path}:${e.line} · ${e.verified?'제공된 줄 확인':'근거 위치 미확인'} · ${e.detail}`,'evidence'));steps.append(row);}s.append(steps);}
-  if(r.missing?.length){const missing=section('추가 확인');missing.append(list(r.missing));s.append(missing);}
-  if(analysis.warnings?.length)s.append(el('div',analysis.warnings.join('\n'),'warning'));
-  return s;
+ const s=el('div'),r=analysis.report;
+ s.className='analysis-report';
+ if(r.formatWarning)s.append(el('div',r.formatWarning,'warning'));
+ if(r.raw){s.append(el('p','분석 응답 형식을 확인하지 못했습니다. 다시 분석해 주세요.','warning'));return s;}
+ const summary=el('div',undefined,'report-summary');summary.append(el('h4','요청 요약'),readableText(r.summary));s.append(summary);
+ // 2026-10-21 김기덕: 파일·라인과 변경 전후를 보여준 뒤 사용자가 누른 수정하기만 적용한다.
+ const patches=section('실제 수정 코드'),changes=r.changes||[];
+ if(changes.length){
+  for(const c of changes){const card=el('article',undefined,'patch-card');card.append(el('h4',`${c.path}:${c.startLine}–${c.endLine}`),readableText(c.reason));
+   for(const [label,value] of [['변경 전',c.before],['변경 후',c.after]]){const block=el('div',undefined,'patch-block');block.append(el('b',label),el('pre',value,'patch-code'));card.append(block);}
+   if(!c.verified)card.append(el('div',c.problem||'수정 위치 확인 필요','warning'));patches.append(card);
+  }
+  const apply=button('수정하기',async()=>{await work(async()=>{const result=await api['apply-changes']({id:activeId,createdAt:analysis.createdAt,text:$('analysis-input').value});notice(result.warning||`소스 수정을 적용했습니다.\n원본 백업: ${result.backupDirectory}`);});},'button primary');
+  apply.disabled=busy||!!analysis.applied||changes.some(c=>!c.verified);patches.append(apply);
+  if(analysis.applied)patches.append(el('p',`수정 적용 완료 · 백업: ${analysis.applied.backupDirectory}`,'hint'));
+ }else{
+  patches.append(el('p','아직 적용할 변경 전·후 코드가 없습니다. 아래 버튼으로 관련 소스를 다시 찾아 구체적인 수정안을 생성하세요.'));
+  patches.append(button('수정 코드 만들기',async()=>work(()=>api['analyze-request']({id:activeId,text:$('analysis-input').value})),'button primary'));
+ }
+ s.append(patches);
+ for(const [index,c] of (r.causes||[]).slice(0,3).entries()){
+  const cause=el('article',undefined,'cause'),heading=el('div',undefined,'fix-heading');heading.append(el('span',String(index+1).padStart(2,'0'),'fix-number'),el('h3',c.title));cause.append(heading);
+  const locations=el('div',undefined,'fix-locations');locations.append(el('h4','수정 위치'));
+  for(const e of c.evidence||[]){const evidence=el('div',undefined,'evidence'),file=el('div',undefined,'file-location');file.append(el('code',e.path),el('span',':'+e.line,'line-number'));if(!e.verified)file.append(el('span','위치 확인 필요','location-warning'));evidence.append(file,el('h4','수정 이유: '),readableText(e.detail));locations.append(evidence);}cause.append(locations);
+  const change=el('div',undefined,'fix-text');change.append(el('h4','수정 방법: '),readableText(c.fix));cause.append(change);s.append(cause);
+ }
+ if(r.missing?.length){const missing=el('details',undefined,'report-missing');missing.append(el('summary','추가 확인이 필요한 내용'),list(r.missing.slice(0,2)));s.append(missing);}
+ return s;
 }
 async function drawDetail(){
   if(!activeId)return;const id=activeId;const r=await api.detail(id);if(id!==activeId)return;
@@ -80,14 +107,21 @@ async function drawDetail(){
   const heading=el('div',undefined,'detail-heading');heading.append(el('h2',r.title||'요청 상세'),el('span',r.review||'미검토','pill'));root.append(heading,el('code',r.id,'detail-id'));
   if(r.error)root.append(el('div','수집 실패: '+r.error,'warning'));
   if(r.warnings?.length)root.append(el('div',r.warnings.join('\n'),'warning'));
-  const original=section('요청내용');original.append(el('div',r.text||'읽어온 본문이 없습니다.','request-text'));
+  // 2026-10-20 김기덕: PMS 원문을 보존하고 사용자가 분석할 요청내용을 직접 편집한다.
+  const original=section('분석 요청내용'),editor=el('textarea');editor.id='analysis-input';editor.maxLength=100000;editor.rows=7;editor.setAttribute('aria-label','분석 요청내용');
+  editor.value=analysisDrafts.get(id)??r.analysisInput??r.text??'';editor.disabled=!!r.detailPending||busy;
+  editor.addEventListener('input',()=>analysisDrafts.set(id,editor.value));
+  const requestControls=el('div',undefined,'request-actions');
+  requestControls.append(button('PMS 원문으로 되돌리기',()=>{editor.value=r.text||'';analysisDrafts.set(id,editor.value);}),button('내용 저장',async()=>{await api['request-edit']({id,text:editor.value});notice('분석 요청내용을 저장했습니다.');await refresh();}),button('분석',async()=>{await work(()=>api['analyze-request']({id,text:editor.value}));notice('분석을 완료했습니다.');},'button primary'));
+  for(const b of requestControls.querySelectorAll('button'))b.disabled=busy||!!r.detailPending;
+  original.append(editor,requestControls);
+  const sourceText=el('details');sourceText.append(el('summary','PMS 원문 확인'),el('div',r.text||'본문 없음','request-text'));original.append(sourceText);
   const images=el('div',undefined,'images');for(const [n,image] of (r.images||[]).entries()){const b=button('',()=>{$('large-image').src=`data:${image.mime};base64,${image.data}`;$('image-view').showModal();},'image-button');b.setAttribute('aria-label',`첨부 이미지 ${n+1} 확대`);const img=el('img');img.src=`data:${image.mime};base64,${image.data}`;img.alt=image.alt||`요청 이미지 ${n+1}`;b.append(img);images.append(b);}original.append(images);root.append(original);
-  if(r.context){const context=section(`찾은 소스 · ${r.context.files.length}개`);context.append(el('code',r.context.target));if(r.context.search)context.append(searchNode(r.context.search));for(const w of r.context.warnings||[])context.append(el('div',w,'warning'));if(r.context.candidates?.length)context.append(list(r.context.candidates));for(const f of r.context.files){const d=el('details');d.append(el('summary',`${f.projectName}/${f.relative} · ${f.reason}${f.truncated?' · 일부 발췌':''}`),el('pre',f.content));context.append(d);}root.append(context);}
   const analysis=section('원인과 수정 방향');
   if(r.analysisError)analysis.append(el('div','분석 실패: '+r.analysisError,'warning'));
   if(r.analysisStale)analysis.append(el('div','요청 또는 연결 소스가 변경됐거나 재수집에 실패했습니다. 아래 결과는 이전 자료에 기반합니다.','warning'));
-  if(r.analysis)analysis.append(reportNode(r.analysis));else analysis.append(el('p','목록에서 요청을 체크하고 소스 연결 후 분석을 실행하세요.'));
-  for(const old of [...(r.analysisHistory||[])].reverse()){const d=el('details');d.append(el('summary',`이전 분석 · ${new Date(old.createdAt).toLocaleString()} · ${old.model}`),reportNode(old));analysis.append(d);}root.append(analysis);
+  if(r.analysis){if(r.analysis.requestText!==undefined&&r.analysis.requestText!==editor.value)analysis.append(el('div','이 결과의 분석 요청: '+r.analysis.requestText,'request-text'));const report=reportNode(r.analysis);if(r.analysisStale)report.querySelectorAll('button').forEach(b=>{if(b.textContent==='수정하기')b.disabled=true;});analysis.append(report);}else analysis.append(el('p','위 요청내용을 확인·수정한 뒤 분석 버튼을 누르세요.'));
+  root.append(analysis);
   const review=section('검토 기록'),controls=el('div',undefined,'review-controls'),select=el('select');select.setAttribute('aria-label','검토 상태');for(const value of ['미검토','검토 중','채택','보류']){const o=el('option',value);o.value=value;select.append(o);}select.value=r.review||'미검토';const note=el('textarea');note.value=r.note||'';note.placeholder='검토 의견과 후속 작업을 기록하세요';note.setAttribute('aria-label','검토 메모');controls.append(select,button('검토 저장',async()=>{await api.review({id:r.id,review:select.value,note:note.value});notice('검토 기록을 저장했습니다.');await refresh();}));review.append(note,controls);root.append(review);
 }
 function drawSettings(){
@@ -102,7 +136,8 @@ async function refresh(){const state=await api.state();settings=state.settings;r
 function drawPreview(value){preview=value;$('destination').textContent=`${value.endpoint} · 모델: ${value.model||'설정 필요'}`;const root=$('preview-items');root.replaceChildren();for(const item of value.items){const s=el('section',undefined,'preview-item');s.append(el('code',item.id),el('p',`${item.files.length}개 소스 · 이미지 ${item.images}개 · 소스 ${item.characters.toLocaleString()}자`));if(item.search)s.append(searchNode(item.search));s.append(list(item.files.map(f=>`${f.path} — ${f.reason}${f.truncated?' (발췌)':''}`)));if(item.warnings.length)s.append(el('div',item.warnings.join('\n'),'warning'));if(item.candidates.length)s.append(list(item.candidates));if(item.blocked)s.append(el('b','관련 소스를 찾지 못해 이 요청은 분석에서 제외됩니다.'));root.append(s);} $('analyze').disabled=value.items.every(i=>i.blocked)||!settings.ai.hasKey||!settings.ai.model;$('preview').showModal();}
 document.querySelectorAll('.nav').forEach(b=>b.onclick=()=>{document.querySelectorAll('.nav').forEach(n=>n.classList.toggle('active',n===b));$('requests-page').hidden=b.dataset.page!=='requests';$('settings-page').hidden=b.dataset.page!=='settings';$('page-title').textContent=b.dataset.page==='requests'?'요청 분석':'프로젝트 · AI 설정';if(b.dataset.page==='settings')drawSettings();});
 $('open-pms').onclick=()=>run(()=>api['open-pms']());
-$('collect').onclick=()=>run(()=>work(async()=>{const result=await api.sync({ready:$('ready').checked});requests=result.requests;selected=new Set(result.ids);notice(`상세 확인 ${result.collected}건 · 동일 내용 생략 ${result.unchanged}건 · 분석 완료 ${result.done}건 · 실패 ${result.failed}건 · 확인 필요 ${result.blocked}건`);}));
+// 2026-10-20 김기덕: 목록 불러오기는 AI와 소스 검색을 실행하지 않는다.
+$('collect').onclick=()=>run(()=>work(async()=>{const result=await api.collect({ready:$('ready').checked});requests=result.requests;selected.clear();activeId=null;chatRow=null;$('detail').replaceChildren(el('p','목록에서 분석할 요청을 선택하세요.'));$('chat-messages').replaceChildren();$('chat-request').textContent='요청을 선택하세요';$('chat-context').textContent='';$('chat-input').value='';notice(`요청 목록 ${result.collected}건을 불러왔습니다. 분석할 요청을 선택하세요.`);}));
 $('search').oninput=drawRows;$('filter').onchange=drawRows;$('select-all').onchange=()=>{for(const r of filtered())$('select-all').checked?selected.add(r.id):selected.delete(r.id);drawRows();};
 $('prepare').onclick=()=>run(async()=>{const value=await work(()=>api.prepare([...selected]));drawPreview(value);});
 $('close-preview').onclick=()=>$('preview').close();$('close-image').onclick=()=>$('image-view').close();

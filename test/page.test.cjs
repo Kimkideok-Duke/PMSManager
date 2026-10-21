@@ -30,6 +30,19 @@ test('임의 iframe은 요청내용으로 읽지 않는다',()=>{
 test('요청내용 편집기 후보가 둘이면 모호한 본문을 수집하지 않는다',()=>{
  const {dom,w,call}=page();const frame=w.document.createElement('iframe');frame.src='/smart_editor2_inputarea.html';w.document.body.append(frame);assert.match(call('snapshot').editorError,/여러 개/);dom.window.close();
 });
+
+// 2026-10-20 김기덕: 실제 PMS의 요청내용 확대창과 원래 탭 편집기를 구분한다.
+test('확대 대화상자의 이전 요청 본문을 제외하고 요청 목록과 같은 탭의 상세를 읽는다',()=>{
+ const {dom,w,call}=page();
+ try{
+  const panel=w.document.createElement('div');panel.setAttribute('role','tabpanel');
+  const children=[...w.document.body.childNodes];w.document.body.append(panel);for(const child of children)panel.append(child);
+  const base=panel.querySelector('iframe').contentDocument;base.open();base.write('<html><body><p>현재 요청 본문</p><img src="data:image/png;base64,aGVsbG8="></body></html>');base.close();
+  const dialog=w.document.createElement('div');dialog.setAttribute('role','dialog');dialog.innerHTML='<div class="cl-text">REQ_ID : REQ-old.xfdl2</div><iframe src="/smart_editor2_inputarea.html"></iframe>';w.document.body.append(dialog);
+  const expanded=dialog.querySelector('iframe').contentDocument;expanded.open();expanded.write('<html><body><p>확대창 이전 요청 내용</p></body></html>');expanded.close();
+  const snap=call('snapshot');assert.equal(snap.editorError,'');assert.equal(snap.detailId,id);assert.equal(snap.text,'현재 요청 본문');assert.equal(snap.images.length,1);
+ }finally{dom.window.close();}
+});
 function page(editorPath='/smart_editor2_inputarea.html',editorAttribute=''){
   const dom=new JSDOM(`<div class="cl-text" id="detail">REQ_ID : ${id}</div><div role="grid" aria-rowcount="3"><div role="row">메뉴명 요청ID</div>${[id,second].map((value,i)=>`<div role="row" data-rowindex="${i}" aria-selected="${i===0}"><div role="gridcell" data-cellindex="4">화면${i}</div><div role="gridcell" data-cellindex="5">오류</div><div role="gridcell" data-cellindex="9"><input value="등록"></div><div role="gridcell" data-cellindex="13">${value}</div></div>`).join('')}</div><iframe ${editorAttribute} src="${editorPath}"></iframe>`,{url:'https://ntest.daewooenc.com/expms/index.do',runScripts:'outside-only'});
   const w=dom.window;w.HTMLElement.prototype.getClientRects=function(){return [{}];};

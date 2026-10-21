@@ -9,7 +9,8 @@ const STOP = new Set(('this form self public private protected static final retu
 const LIMITS = {files:75000,postings:3000000,termsPerFile:30000,contextFiles:40,contextChars:240000,depth:5};
 const normalized = value => value.replaceAll('\\','/').replaceAll('::','/').replace(/^\/+|\/+$/g,'').toLowerCase();
 const label = f => `${f.projectName}/${f.relative}`;
-const useful = term => term.length>=3 && term.length<=180 && !STOP.has(term) && !/^\d+$/.test(term);
+// 2026-10-21 김기덕: KB·MB 같은 짧은 파일 용량 단위도 소스 검색 단서로 사용한다.
+const useful = term => (term.length>=3||/^(?:kb|mb|gb)$/i.test(term)) && term.length<=180 && !STOP.has(term) && !/^\d+$/.test(term);
 
 function words(text) {
   const result=new Set();
@@ -242,6 +243,12 @@ async function buildScopedContext(request,catalog,signal,onProgress){
   const inFolder=(file,folder)=>!!folder&&`/${normalized(slash(path.join(file.root,file.relative)))}/`.includes(`/${folder}/`);
   for(const file of catalog.files)if(inFolder(file,scope.folder)||scope.code&&inFolder(file,`${scope.business}/${scope.code}`))add(file);
   stages.push({stage:'업무 폴더',scope:scope.folder||scope.code||'경로 미확인',files:selected.size});
+  // 2026-10-21 김기덕: 첨부 크기·표시 요청은 업무 밖의 공통 파일 UDC·유틸리티도 제한적으로 검색한다.
+  if(/첨부|파일|용량|크기|사이즈|\b(?:kb|mb|gb|bytes?)\b|file\s*size|upload|download/i.test(request.text||'')){
+    const shared=catalog.files.filter(f=>/\/(?:udc|module|common|shared)\//i.test('/'+slash(f.relative))&&/file|attach|atch|upload|download/i.test(path.basename(f.relative))).slice(0,100);
+    for(const file of shared)add(file);
+    if(shared.length)stages.push({stage:'첨부 공통 소스',scope:'파일 관련 공통 UDC·모듈',files:selected.size});
+  }
   const names=words(`${scope.target}\n${request.text||''}`);
   for(const file of catalog.files){const base=normalized(path.basename(file.relative));if(names.has(base)||names.has(base.replace(/\.[^.]+$/,'')))add(file);}
   if(!selected.size&&scope.business){

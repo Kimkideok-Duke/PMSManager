@@ -59,6 +59,10 @@ function pageAction(action, arg) {
   function getEditors() {
     // 2026-10-16 김기덕: 일반 iframe을 요청내용으로 오인하지 않도록 편집기 식별을 필수화한다.
     const candidates = [];
+    // 2026-10-20 김기덕: 확대 편집 대화상자의 이전 본문을 제외하고 목록과 같은 탭의 상세만 읽는다.
+    const panel=grid.closest('[role="tabpanel"]');
+    const popupSelector='[role="dialog"],[aria-modal="true"],.cl-dialog,.cl-dialog-wrapper';
+    const gridPopup=grid.closest(popupSelector);
     function visit(doc, depth, hostFrame) {
       if (!doc || depth > 6) return;
       if (doc !== document) {
@@ -74,6 +78,10 @@ function pageAction(action, arg) {
       }
       for (const frame of doc.querySelectorAll('iframe')) {
         if (!frame.getClientRects().length) continue;
+        if(doc===document){
+          if(panel&&!panel.contains(frame))continue;
+          if(frame.closest(popupSelector)!==gridPopup)continue;
+        }
         try { visit(frame.contentDocument, depth + 1, frame); } catch {}
       }
     }
@@ -83,8 +91,10 @@ function pageAction(action, arg) {
   }
 
   function findDetailId() {
+    // 2026-10-20 김기덕: 상세ID도 요청 목록의 탭 안에서 확인해 확대창의 ID와 혼동하지 않는다.
+    const detailScope=grid.closest('[role="tabpanel"]')||document;
     // 1. Check detail header in .cl-text, .cl-output, and other visible elements
-    const elements = [...document.querySelectorAll('.cl-text, .cl-output, .cl-control, label, span, div, p, b')].filter(visible);
+    const elements = [...detailScope.querySelectorAll('.cl-text, .cl-output, .cl-control, label, span, div, p, b')].filter(visible);
     for (const el of elements) {
       if (el.children.length > 2) continue;
       const txt = (el.innerText || el.textContent || '').trim();
@@ -92,7 +102,8 @@ function pageAction(action, arg) {
       if (m) return m[1].trim();
     }
     // 2026-10-16 김기덕: 그리드 ID 셀을 상세 헤더로 간주하지 않는다.
-    const mBody = (document.body.innerText || document.body.textContent || '').match(/REQ_ID\s*:\s*(REQ-[\w./\\-]+(?:\.[A-Za-z0-9]+)?\w*)/i);
+    const scopeBody=detailScope.body||detailScope;
+    const mBody = (scopeBody.innerText || scopeBody.textContent || '').match(/REQ_ID\s*:\s*(REQ-[\w./\\-]+(?:\.[A-Za-z0-9]+)?\w*)/i);
     return mBody ? mBody[1].trim() : '';
   }
 

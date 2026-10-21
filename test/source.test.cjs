@@ -5,7 +5,25 @@ const os=require('node:os');
 const path=require('node:path');
 const {requestPath,indexProjects,buildContext,redact,readSource}=require('../src/core/source.cjs');
 const {Store,mergeRequests}=require('../src/core/store.cjs');
+const {expandPatchContext}=require('../src/core/patch-context.cjs');
 async function fixture(t){const root=await fs.mkdtemp(path.join(os.tmpdir(),'pms-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));return root;}
+
+// 2026-10-21 김기덕: 파일은 찾았지만 셀 정의가 발췌에서 빠져 수정 코드를 못 만드는 사례를 검증한다.
+test('AI가 지목한 작은 소스는 후반부 줄까지 전체 전달하며 카탈로그 밖 파일은 읽지 않는다',async t=>{
+ const root=await fixture(t),absolute=path.join(root,'Popup.clx');await fs.writeFile(absolute,Array.from({length:130},(_,i)=>`<cell id="n${i}"/>`).join('\n'));
+ const meta={absolute,root,relative:'Popup.clx',projectId:'p',projectName:'P'};
+ const context={files:[],warnings:[],hash:'old'};const expanded=await expandPatchContext(context,{files:[meta]},['Popup.clx의 fileSize 셀 전체','../../secret.xml']);
+ assert.equal(expanded.files.length,1);assert.equal(expanded.files[0].truncated,false);assert.ok(expanded.files[0].lineNumbers.includes(130));assert.notEqual(expanded.hash,'old');
+});
+
+// 2026-10-21 김기덕: 짧은 KB 요청도 업무 밖 공통 첨부 소스와 해당 줄을 찾아야 한다.
+test('KB 단위 오류는 공통 File 모듈과 후반부의 단위 변환 코드를 찾는다',async t=>{
+ const root=await fixture(t);await fs.mkdir(path.join(root,'app/ec/ecg'),{recursive:true});await fs.mkdir(path.join(root,'module/common'),{recursive:true});
+ await fs.writeFile(path.join(root,'app/ec/ecg/ECG0704.js'),'function openFile() {}');
+ await fs.writeFile(path.join(root,'module/common/File.module.js'),Array.from({length:80},()=>('// filler')).join('\n')+'\n// KB size 표시\nfunction fileSize(bytes) { return bytes / 1024; }');
+ const index=await indexProjects([{id:'p',name:'P',path:root}],undefined,()=>{},{scoped:true});const context=await buildContext({id:'REQ-ec/ecg/ECG0704.xfdl1',text:'단위가 틀림 KB -> B'},index);
+ const file=context.files.find(f=>f.relative.endsWith('File.module.js'));assert.ok(file);assert.ok(file.content.includes('bytes / 1024'));assert.ok(file.lineNumbers.includes(82));assert.ok(context.search.scope.stages.some(s=>s.stage==='첨부 공통 소스'));
+});
 test('요청ID에서 파일 경로를 추출하고 요청 일련번호는 제외한다',()=>{
   assert.equal(requestPath('REQ-ec/ecg/ECG0502.xfdl36'),'ec/ecg/ECG0502.xfdl');
   assert.equal(requestPath('REQ-ec\\ecc\\ECC0204.xfdl118'),'ec/ecc/ECC0204.xfdl');

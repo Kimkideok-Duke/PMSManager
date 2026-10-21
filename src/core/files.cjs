@@ -47,7 +47,8 @@ async function readSource(file) {
 
 function excerpts(text, needles, limit) {
   const lines = redact(text).split(/\r?\n/);
-  const terms = [...new Set(needles.map(t=>String(t).toLowerCase()))].filter(t=>t.length>2);
+  // 2026-10-21 김기덕: 파일 단위 오류의 핵심인 KB·MB·GB 줄도 소스 발췌에 포함한다.
+  const terms = [...new Set(needles.map(t=>String(t).toLowerCase()))].filter(t=>t.length>2||/^(?:kb|mb|gb)$/.test(t));
   const ranked = [];
   for (let i=0;i<lines.length;i++) {
     const lower=lines[i].toLowerCase();
