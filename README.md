@@ -1,5 +1,15 @@
 # PMS Manager
 
+**[⬇ 최신 실행파일 다운로드 (PMS-Manager.zip)](https://github.com/Kimkideok-Duke/PMSManager/releases/latest/download/PMS-Manager.zip)**
+
+ZIP을 압축 해제하고 `PMS-Manager.exe`를 실행하세요. 별도 Node.js 설치는 필요하지 않습니다. 업데이트할 때는 기존 프로그램을 종료한 뒤 실행파일을 교체하세요.
+
+[사용 안내](DISTRIBUTION.md) · [최신 릴리스 및 변경 사항](https://github.com/Kimkideok-Duke/PMSManager/releases/latest)
+
+비공개 저장소이므로 다운로드하려면 저장소 접근 권한이 있는 GitHub 계정으로 로그인해야 합니다.
+
+<!-- 2026-10-22 김기덕: README 상단에 최신 릴리스 ZIP 바로 다운로드와 사용 안내를 추가했다. -->
+
 PMS 요청내용·이미지와 로컬 프로젝트 소스를 연결해 원인 후보와 수정 방향을 분석하는 Windows PC 프로그램입니다.
 
 ## 실행 순서
