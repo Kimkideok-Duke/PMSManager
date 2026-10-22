@@ -95,14 +95,14 @@ requestText는 사용자가 확인·수정한 분석 요청입니다. userClarif
 출력에는 요청 요약, 수정할 소스와 줄, 수정 이유, 구체적인 변경 방법만 포함하세요.
 수정 대상은 직접 관련된 최대 3개, summary는 2문장 이내, title은 1줄, fix는 3문장 이내로 작성하세요.
 fix에는 수정할 함수·조건·바인딩·쿼리를 명시하고 현재 동작을 어떻게 바꿀지 설명하세요. evidence.detail에는 그 위치를 수정해야 하는 이유를 1~2문장으로 적으세요.
-설명만으로 끝내지 말고 제공 소스에서 해결 위치가 확인되면 changes에 바로 적용할 변경 전·후 코드를 작성하세요. before는 줄 번호 접두어를 제외한 원래 코드 그대로이며 공백·들여쓰기를 보존하세요. 연속된 줄만 교체하고 after에는 올바른 문법의 주석으로 전달된 changeDate와 김기덕 및 변경 설명을 포함하세요. XML/CLX는 요소 경계에 유효한 XML 주석을 넣을 수 있는 범위를 선택하세요. 소스가 부족하면 변경을 지어내지 말고 missing에 찾을 파일명·함수명을 구체적으로 적으세요.
+설명만으로 끝내지 말고 제공 소스에서 해결 위치가 확인되면 changes에 바로 적용할 변경 전·후 코드를 작성하세요. before는 줄 번호 접두어를 제외한 원래 코드 그대로이며 공백·들여쓰기를 보존하세요. 연속된 줄만 교체하고 after에는 문제 해결에 필요한 코드만 작성하세요. 날짜·작성자·수정 설명을 비롯한 새 주석은 추가하지 마세요. 기존 소스의 주석은 수정에 필요한 경우를 제외하고 보존하고, 변경 이유는 코드 주석 대신 reason에 작성하세요. 소스가 부족하면 변경을 지어내지 말고 missing에 찾을 파일명·함수명을 구체적으로 적으세요.
 근거는 제공된 path와 실제 제공된 줄 번호만 사용하세요. 관련 파일이 없으면 추측한 파일·줄을 만들지 말고 missing에 핵심 부족 자료만 최대 2개 적으세요.
 요청과 관계없는 내용은 제외하세요. 추정인 경우 title 또는 fix에 '추정'이라고 명시하세요.
 처리 흐름 나열, 이미지별 관찰 목록, 검색 통계, 일반적인 테스트 절차, 재현 확인 안내, 반복 설명과 인사말은 쓰지 마세요.
 반드시 다음 JSON 객체만 반환하세요:
-{"summary":"어떤 오류 또는 변경 요청인지","causes":[{"title":"수정 대상","confidence":"높음|중간|낮음","evidence":[{"path":"제공된 path","line":1,"detail":"이 위치를 수정해야 하는 이유"}],"fix":"어떤 함수나 조건을 어떻게 수정할지"}],"changes":[{"path":"제공된 path","startLine":1,"endLine":3,"before":"변경 전 코드","after":"날짜 김기덕 수정 설명 주석을 포함한 변경 후 코드","reason":"변경 이유"}],"missing":["수정 위치 결정에 꼭 필요한 자료만"]}`;
+{"summary":"어떤 오류 또는 변경 요청인지","causes":[{"title":"수정 대상","confidence":"높음|중간|낮음","evidence":[{"path":"제공된 path","line":1,"detail":"이 위치를 수정해야 하는 이유"}],"fix":"어떤 함수나 조건을 어떻게 수정할지"}],"changes":[{"path":"제공된 path","startLine":1,"endLine":3,"before":"변경 전 코드","after":"새 주석을 추가하지 않은 변경 후 코드","reason":"변경 이유"}],"missing":["수정 위치 결정에 꼭 필요한 자료만"]}`;
 function promptFor(request,context) {
-  return JSON.stringify({changeDate:new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Seoul'}).format(new Date()),requestId:request.id,title:request.title,requestText:redact(request.text),userNotes:redact(request.note||''),userClarifications:(request.chatMessages||[]).filter(m=>m.role==='user').slice(-6).map(m=>redact(m.content)),target:context.target,warnings:[...(request.warnings||[]),...context.warnings],search:context.search?{indexedFiles:context.search.indexedFiles,selectedFiles:context.search.selectedFiles,omittedFiles:context.search.omittedFiles,trace:context.search.trace}:undefined,sources:context.files.map(f=>({path:`${f.projectName}/${f.relative}`,reason:f.reason,truncated:f.truncated,content:f.content}))});
+  return JSON.stringify({requestId:request.id,title:request.title,requestText:redact(request.text),userNotes:redact(request.note||''),userClarifications:(request.chatMessages||[]).filter(m=>m.role==='user').slice(-6).map(m=>redact(m.content)),target:context.target,warnings:[...(request.warnings||[]),...context.warnings],search:context.search?{indexedFiles:context.search.indexedFiles,selectedFiles:context.search.selectedFiles,omittedFiles:context.search.omittedFiles,trace:context.search.trace}:undefined,sources:context.files.map(f=>({path:`${f.projectName}/${f.relative}`,reason:f.reason,truncated:f.truncated,content:f.content}))});
 }
 function buildRequest(config,key,request,context,conversation=null) {
   if(!config.model?.trim()) throw new Error('사용할 모델을 선택하거나 입력하세요.');

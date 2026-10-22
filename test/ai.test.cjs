@@ -4,6 +4,15 @@ const {buildRequest,parseReport,analyze,listModels,endpoint}=require('../src/cor
 const request={id:'REQ-ec/Main.xfdl1',title:'test',text:'password=hidden',fingerprint:'r1',images:[{mime:'image/png',data:'aGVsbG8='}]};
 const context={target:'ec/Main.xfdl',hash:'c1',warnings:[],files:[{projectName:'P',relative:'Main.xfdl',reason:'요청ID 연결',content:'1: function save() {}',lineNumbers:[1],hash:'filehash'}]};
 const fake=data=>async()=>({ok:true,status:200,text:async()=>JSON.stringify(data)});
+
+test('모든 공급자의 수정안 지시는 새 주석을 금지하고 고정 작성자와 날짜를 전달하지 않는다',()=>{
+ for(const provider of ['openai','anthropic','gemini','compatible']){
+  const {init}=buildRequest({provider,endpoint:'https://custom.example/v1',model:'chosen-model'},'fake-key',request,context);
+  assert.ok(init.body.includes('새 주석은 추가하지 마세요'));
+  assert.ok(init.body.includes('기존 소스의 주석'));
+  assert.ok(!init.body.includes('김기덕'));assert.ok(!init.body.includes('changeDate'));
+ }
+});
 test('모든 공급자에 본문과 이미지가 함께 전송되며 비밀값은 가린다',()=>{
   for(const provider of ['openai','anthropic','gemini','compatible']){const {url,init}=buildRequest({provider,endpoint:'https://custom.example/v1',model:'chosen-model'},'fake-key',request,context);assert.ok(url.startsWith('https:'));const body=JSON.parse(init.body);assert.ok(init.body.includes('aGVsbG8='));assert.ok(!init.body.includes('password=hidden'));assert.ok(init.body.includes('[REDACTED]'));assert.ok(init.body.includes('1: function save()'));if(provider==='openai')assert.equal(body.store,false);assert.ok(!url.includes('fake-key'));}
 });

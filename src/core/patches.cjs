@@ -15,7 +15,7 @@ function validateChanges(changes,context){
    if(numbers.some(n=>!file.lineNumbers.includes(n)||!lines.has(n)))problem='수정 범위 전체가 소스 발췌에 포함되지 않았습니다.';
    else if(numbers.map(n=>lines.get(n)).join('\n')!==value.before)problem='변경 전 코드가 제공된 소스 줄과 일치하지 않습니다.';
    else if(redact(value.before)!==value.before||redact(value.after)!==value.after||/\[REDACTED\]/.test(value.before+value.after))problem='비밀값이 포함되거나 가려진 코드는 자동 수정할 수 없습니다.';
-   else if(!/\d{4}-\d{2}-\d{2}.*김기덕/.test(value.after))problem='변경 후 코드에 날짜·김기덕·수정 설명 주석이 필요합니다.';
+   else if(value.after.split('\n').some(line=>/^\s*(?:\/\/|\/\*|\*|<!--|#|--).*\d{4}-\d{2}-\d{2}\s+김기덕/.test(line)&&!value.before.split('\n').some(original=>original.trim()===line.trim())))problem='예전 작성자 주석이 포함된 수정안입니다. 다시 분석해 주석 없는 수정안을 생성하세요.';
   }
   return {...value,verified:!problem,problem,sourceHash:file?.hash,projectId:file?.projectId,relative:file?.relative};
  });
@@ -31,7 +31,7 @@ function inside(root,file){const rel=path.relative(root,file);return rel!==''&&r
 async function applyChanges({changes,context,projects,backupRoot,requestId,date,signal,writeFile=fs.writeFile}){
  signal?.throwIfAborted();
  const checked=validateChanges(changes,context);if(!checked.length||checked.some(c=>!c.verified))throw Error(checked.find(c=>!c.verified)?.problem||'적용 가능한 코드 수정안이 없습니다.');
- const groups=new Map();for(const c of checked){if(!c.after.includes(date+' 김기덕'))throw Error('오늘 날짜와 김기덕이 포함된 수정 주석으로 다시 분석하세요.');if(!groups.has(c.path))groups.set(c.path,[]);groups.get(c.path).push(c);}
+ const groups=new Map();for(const c of checked){if(!groups.has(c.path))groups.set(c.path,[]);groups.get(c.path).push(c);}
  const plans=[];
  for(const [label,items] of groups){
   signal?.throwIfAborted();
